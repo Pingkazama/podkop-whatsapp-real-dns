@@ -3,13 +3,16 @@
 [Русская версия](README.md) · [Detailed Russian manual](docs/manual-ru.md)
 
 A small community fix for OpenWrt + Podkop + sing-box installations where
-WhatsApp messages remain pending, media is unreliable, or connectivity returns
-only after switching between Wi-Fi and mobile data.
+WhatsApp is unreliable for local-network clients: messages remain pending,
+media fails intermittently, or connectivity disappears at random.
 
 The fix returns real IP addresses only for `whatsapp.com`, `whatsapp.net`,
 `whatsapp.biz`, and `wa.me`. Global FakeIP remains enabled, and every IPv4 in
 the current control lookup must already be covered by Podkop's
 `podkop_subnets` nftables set.
+
+The scope is not limited to phones or Wi-Fi. Any wired or wireless device may
+be affected when it uses the OpenWrt router as its DNS service.
 
 > This is an independent community project, not an official Podkop component.
 > Run `check` before making any changes and keep router access available.

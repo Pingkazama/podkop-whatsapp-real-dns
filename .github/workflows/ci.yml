@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Validate POSIX shell syntax
+        run: |
+          sh -n install.sh
+          sh -n whatsapp-real-dns-fix.sh
+
+      - name: Run ShellCheck
+        run: shellcheck -s sh install.sh whatsapp-real-dns-fix.sh

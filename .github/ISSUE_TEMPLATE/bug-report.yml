@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem without sharing private data
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, keys, proxy links, subscription URLs,
+        configuration backups, packet captures, or public IP inventories.
+  - type: input
+    id: openwrt
+    attributes:
+      label: OpenWrt version
+    validations:
+      required: true
+  - type: input
+    id: podkop
+    attributes:
+      label: Podkop version
+    validations:
+      required: true
+  - type: input
+    id: singbox
+    attributes:
+      label: sing-box version
+    validations:
+      required: true
+  - type: dropdown
+    id: action
+    attributes:
+      label: Failing action
+      options:
+        - check
+        - apply
+        - status
+        - rollback
+        - installer
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Sanitized output
+      description: Remove IP addresses and any environment-specific values.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

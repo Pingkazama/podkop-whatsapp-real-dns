@@ -9,6 +9,7 @@ PROGRAM="whatsapp-real-dns-fix"
 ASSET="$PROGRAM.sh"
 TARGET="${TARGET:-/usr/bin/$PROGRAM}"
 WORK_DIR="/tmp/$PROGRAM-install.$$"
+INSTALL_TMP=""
 
 say() {
     printf '%s\n' "$1"
@@ -19,9 +20,14 @@ fail() {
     exit 1
 }
 
+cleanup() {
+    rm -rf "$WORK_DIR"
+    [ -z "$INSTALL_TMP" ] || rm -f "$INSTALL_TMP"
+}
+
 [ "$(id -u 2>/dev/null || echo 1)" = "0" ] || fail "run_as_root"
 
-for command_name in wget sha256sum awk chmod cp date mkdir rm sh; do
+for command_name in wget sha256sum awk chmod cp mkdir mv rm sh; do
     command -v "$command_name" >/dev/null 2>&1 || fail "missing_command_$command_name"
 done
 
@@ -38,7 +44,7 @@ esac
 
 umask 077
 mkdir -p "$WORK_DIR"
-trap 'rm -rf "$WORK_DIR"' 0
+trap cleanup 0
 trap 'exit 130' HUP INT TERM
 
 say "download:$ASSET"
@@ -52,18 +58,22 @@ actual="$(sha256sum "$WORK_DIR/$ASSET" | awk '{ print $1 }')"
 
 sh -n "$WORK_DIR/$ASSET" || fail "downloaded_script_syntax_error"
 
+[ ! -d "$TARGET" ] || fail "target_is_directory"
 if [ -e "$TARGET" ]; then
-    backup="$TARGET.backup.$(date +%Y%m%d-%H%M%S)"
-    cp -p "$TARGET" "$backup" || fail "existing_script_backup_failed"
-    chmod 700 "$backup" 2>/dev/null || true
-    say "backup:$backup"
+    say "existing:detected"
 fi
 
-cp "$WORK_DIR/$ASSET" "$TARGET" || fail "install_copy_failed"
-chmod 700 "$TARGET" || fail "install_chmod_failed"
+INSTALL_TMP="$TARGET.new.$$"
+[ ! -e "$INSTALL_TMP" ] || fail "install_temp_exists"
+cp "$WORK_DIR/$ASSET" "$INSTALL_TMP" || fail "install_copy_failed"
+chmod 700 "$INSTALL_TMP" || fail "install_chmod_failed"
+sh -n "$INSTALL_TMP" || fail "install_temp_syntax_error"
+mv -f "$INSTALL_TMP" "$TARGET" || fail "atomic_replace_failed"
+INSTALL_TMP=""
 
 say "checksum:ok"
 say "installed:$TARGET"
+say "replacement:atomic"
 say "changes_applied:no"
 say "next:$PROGRAM check"
 say "then:$PROGRAM apply"

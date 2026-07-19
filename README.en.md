@@ -27,14 +27,22 @@ wget -O /tmp/install.sh \
 sh /tmp/install.sh
 ```
 
-The installer verifies SHA256 and installs
-`/usr/bin/whatsapp-real-dns-fix`. It does **not** apply the DNS change.
+The installer verifies SHA256 and atomically replaces
+`/usr/bin/whatsapp-real-dns-fix`. It does **not** apply or remove the active DNS
+configuration, and a failed final replacement leaves the previous executable
+in place.
 
 ```sh
 whatsapp-real-dns-fix check
 whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 ```
+
+To upgrade v1.0.0 or v1.0.1, run the current installer without uninstalling the
+old version, then run the three commands above. `check` recognizes managed state
+v2/v3 and reports `upgrade:ready`; `apply` creates a minimal backup before
+normalizing the old `confdir` UCI list to a scalar option and migrating to state
+v4. An unknown managed-state version is rejected before any files are changed.
 
 A successful `check` now also prints
 `sing_box_fakeip_engine:active`. If sing-box uses a confirmed non-default local
@@ -58,19 +66,21 @@ whatsapp-real-dns-fix rollback
 ## Safety properties
 
 - validates OpenWrt, dnsmasq, Podkop, sing-box, and nftables prerequisites;
-- verifies that all IPv4 addresses in the current control lookup use Podkop
-  routing;
-- creates configuration and full `sysupgrade` backups before applying;
+- samples changing DNS answers repeatedly and requires every returned IPv4 to
+  use Podkop routing;
+- creates a small root-only backup of only the files it changes;
 - stores rules in a Podkop-restart-safe dnsmasq `confdir`;
+- rejects a different explicit dnsmasq `confdir` before making changes;
 - automatically rolls back when post-install checks fail;
-- distinguishes dnsmasq and FakeIP post-check failures;
+- distinguishes no answer, remaining FakeIP, an unrouted real IP, stopped
+  dnsmasq, and FakeIP control failures;
 - reports a rollback as successful only after dnsmasq is running again;
 - does not change community lists, proxy profiles, firewall, or sing-box JSON.
 
 `rollback:verified` confirms automatic recovery. An error ending in
 `_rollback_failed_manual_recovery_required` requires manual restoration from
-the reported backup. The `upgrade: Saving config files...` line is normal
-backup output, not an error.
+the reported backup. Automatic `apply` deliberately does not create a full
+`sysupgrade -b` archive on a small router overlay.
 
 For the complete explanation and manual procedure, see
 [`docs/manual-ru.md`](docs/manual-ru.md).

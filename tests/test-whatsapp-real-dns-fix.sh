@@ -111,13 +111,15 @@ sleep() {
 
 attempt=0
 # Called indirectly by wait_for_postcheck() from the sourced production code.
-# shellcheck disable=SC2329
+# ShellCheck 0.9 reports SC2317; 0.11 reports SC2329 for this mock.
+# shellcheck disable=SC2317,SC2329
 router_returns_real_routed_ips() {
     [ "$attempt" = "0" ]
 }
 
 # Called indirectly by wait_for_postcheck() from the sourced production code.
-# shellcheck disable=SC2329
+# ShellCheck 0.9 reports SC2317; 0.11 reports SC2329 for this mock.
+# shellcheck disable=SC2317,SC2329
 fakeip_engine_still_works() {
     FAKEIP_PROBE_RESULT="no_ipv4_answer"
     [ "$attempt" = "1" ]
@@ -127,10 +129,14 @@ wait_for_postcheck && fail_test "postcheck_accepted_results_from_different_attem
 assert_equal "0" "$POSTCHECK_REAL_OK" "failed_postcheck_real_state"
 assert_equal "0" "$POSTCHECK_FAKE_OK" "failed_postcheck_fake_state"
 
+# Called indirectly by wait_for_postcheck() from the sourced production code.
+# shellcheck disable=SC2317,SC2329
 router_returns_real_routed_ips() {
     [ "$attempt" -ge 2 ]
 }
 
+# Called indirectly by wait_for_postcheck() from the sourced production code.
+# shellcheck disable=SC2317,SC2329
 fakeip_engine_still_works() {
     FAKEIP_PROBE_RESULT="active"
     [ "$attempt" -ge 2 ]

@@ -43,7 +43,7 @@ body:
     id: output
     attributes:
       label: Sanitized output
-      description: Remove IP addresses and any environment-specific values.
+      description: Include check/apply markers and remove public IP addresses and any environment-specific values.
       render: text
     validations:
       required: true

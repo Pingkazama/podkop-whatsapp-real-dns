@@ -36,6 +36,19 @@ whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 ```
 
+A successful `check` now also prints
+`sing_box_fakeip_engine:active`. If sing-box uses a confirmed non-default local
+FakeIP DNS address, pass the same override to `check` and `apply`:
+
+```sh
+FAKE_DNS=127.0.0.54 whatsapp-real-dns-fix check
+FAKE_DNS=127.0.0.54 whatsapp-real-dns-fix apply
+```
+
+Do not use a public resolver for `FAKE_DNS`; the endpoint must be the sing-box
+DNS listener that returns FakeIP answers. The selected address is persisted in
+managed state after a successful installation.
+
 Rollback is available at any time:
 
 ```sh
@@ -50,7 +63,14 @@ whatsapp-real-dns-fix rollback
 - creates configuration and full `sysupgrade` backups before applying;
 - stores rules in a Podkop-restart-safe dnsmasq `confdir`;
 - automatically rolls back when post-install checks fail;
+- distinguishes dnsmasq and FakeIP post-check failures;
+- reports a rollback as successful only after dnsmasq is running again;
 - does not change community lists, proxy profiles, firewall, or sing-box JSON.
+
+`rollback:verified` confirms automatic recovery. An error ending in
+`_rollback_failed_manual_recovery_required` requires manual restoration from
+the reported backup. The `upgrade: Saving config files...` line is normal
+backup output, not an error.
 
 For the complete explanation and manual procedure, see
 [`docs/manual-ru.md`](docs/manual-ru.md).

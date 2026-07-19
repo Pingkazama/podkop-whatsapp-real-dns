@@ -196,6 +196,16 @@ sh -n /tmp/whatsapp-real-dns-fix.sh
 /tmp/whatsapp-real-dns-fix.sh check
 ```
 
+Успешная проверка обязательно подтверждает не только реальный DNS и маршруты,
+но и отдельный контрольный FakeIP-вход sing-box:
+
+```text
+preflight:ok
+real_dns_answer:available
+all_real_ipv4_routes:podkop
+sing_box_fakeip_engine:active
+```
+
 Если проверка прошла, примените исправление:
 
 ```sh
@@ -204,7 +214,8 @@ sh -n /tmp/whatsapp-real-dns-fix.sh
 
 Скрипт самостоятельно:
 
-1. проверит OpenWrt, dnsmasq, Podkop, sing-box и nftables;
+1. проверит OpenWrt, dnsmasq, Podkop, sing-box, контрольный FakeIP DNS и
+   nftables;
 2. выберет обычный DNS IPv4 из настроек Podkop;
 3. проверит все реальные IPv4 WhatsApp в `podkop_subnets`;
 4. создаст root-only бэкап и полный `sysupgrade -b` архив;
@@ -212,7 +223,10 @@ sh -n /tmp/whatsapp-real-dns-fix.sh
 6. перезапустит только dnsmasq;
 7. проверит реальные DNS-ответы, маршрутизацию и сохранение общего FakeIP;
 8. автоматически восстановит исходный DHCP-конфиг, если финальный тест не
-   пройдёт.
+   пройдёт, и сообщит об откате только после проверки dnsmasq.
+
+Сообщение `upgrade: Saving config files...` во время `apply` относится к
+созданию `sysupgrade`-бэкапа и само по себе не является ошибкой.
 
 Проверка уже установленного исправления:
 
@@ -280,6 +294,20 @@ nslookup api.whatsapp.net 127.0.0.42
 
 Если `127.0.0.42` вообще не отвечает, не копируйте команды вслепую: конкретная
 установка Podkop может использовать другую схему DNS.
+
+Новая версия автоматического скрипта остановит уже `check` с ошибкой
+`fakeip_control_dns_failed_*`, не меняя конфигурацию. Если FakeIP DNS точно
+работает на другом локальном IPv4, передайте его одинаково в `check` и `apply`:
+
+```sh
+FAKE_DNS=127.0.0.54 /tmp/whatsapp-real-dns-fix.sh check
+FAKE_DNS=127.0.0.54 /tmp/whatsapp-real-dns-fix.sh apply
+```
+
+После успешной установки выбранный адрес сохраняется в managed state и
+используется командами `status` и последующими обновлениями. Не подставляйте
+произвольный публичный DNS: здесь нужен именно DNS-вход sing-box, возвращающий
+FakeIP.
 
 ## Шаг 2. Находим реальный DNS-сервер
 
@@ -809,6 +837,23 @@ sleep 3
 вернуть `/etc/config/dhcp` и каталог `dnsmasq.d`.
 
 ## Типовые проблемы
+
+### `apply` сообщает об ошибке postcheck
+
+Скрипт теперь печатает отдельную диагностическую строку перед откатом:
+
+- `postcheck:dnsmasq_whatsapp_answer_failed` — dnsmasq не вернул только реальные
+  IPv4, либо хотя бы один адрес не вошёл в `podkop_subnets`;
+- `postcheck:sing_box_fakeip_engine_failed_no_ipv4_answer` — контрольный FakeIP
+  DNS не ответил;
+- `postcheck:sing_box_fakeip_engine_failed_not_fake` — контрольный DNS ответил
+  обычным IPv4 вместо FakeIP.
+
+`rollback:verified` и суффикс `_rolled_back` означают, что исходные файлы
+восстановлены, dnsmasq перезапущен и его рабочее состояние проверено. Суффикс
+`_rollback_failed_manual_recovery_required` означает, что автоматический откат
+не подтверждён; не повторяйте `apply`, сохраните показанный путь `backup:` и
+используйте раздел «Аварийный откат из бэкапа».
 
 ### После изменения роутер всё равно возвращает FakeIP
 

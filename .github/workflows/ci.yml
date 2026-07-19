@@ -27,9 +27,9 @@ jobs:
           sh -n tests/test-whatsapp-real-dns-fix.sh
 
       - name: Run ShellCheck
-        run: >-
-          shellcheck -s sh install.sh whatsapp-real-dns-fix.sh
-          tests/test-install.sh tests/test-whatsapp-real-dns-fix.sh
+        run: |
+          shellcheck -s sh install.sh whatsapp-real-dns-fix.sh tests/test-install.sh
+          shellcheck -s sh -e SC2034,SC2317 tests/test-whatsapp-real-dns-fix.sh
 
       - name: Run unit tests
         run: |

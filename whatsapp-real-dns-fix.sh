@@ -11,7 +11,7 @@ set -u
 
 STATE_PACKAGE="whatsapp_real_dns"
 STATE_FILE="/etc/config/$STATE_PACKAGE"
-STATE_VERSION="2"
+STATE_VERSION="3"
 DNSMASQ_SECTION="dhcp.@dnsmasq[0]"
 FIX_DIR="/etc/config/dnsmasq.d"
 FIX_CONF="$FIX_DIR/90-whatsapp-real-dns.conf"
@@ -19,6 +19,14 @@ DOMAINS="whatsapp.com whatsapp.net whatsapp.biz wa.me"
 PROBE_NAME="api.whatsapp.net"
 BACKUP_ROOT="/root/whatsapp-real-dns-backups"
 LOCK_DIR="/tmp/whatsapp-real-dns-fix.lock"
+DEFAULT_FAKE_DNS="127.0.0.42"
+
+FAKE_DNS_EXPLICIT=0
+if [ "${FAKE_DNS+x}" = "x" ]; then
+    FAKE_DNS_EXPLICIT=1
+else
+    FAKE_DNS="$DEFAULT_FAKE_DNS"
+fi
 
 say() {
     printf '%s\n' "$1"
@@ -31,6 +39,15 @@ fail() {
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+load_state_fake_dns() {
+    [ "$FAKE_DNS_EXPLICIT" = "0" ] || return 0
+    have uci || return 0
+
+    stored_fake_dns="$(uci -q get "$STATE_PACKAGE.settings.fake_dns" 2>/dev/null || true)"
+    [ -n "$stored_fake_dns" ] || return 0
+    FAKE_DNS="$stored_fake_dns"
 }
 
 require_root() {
@@ -151,6 +168,11 @@ preflight_basic() {
 
 preflight() {
     preflight_basic || return 1
+
+    is_ipv4 "$FAKE_DNS" || {
+        fail "invalid_FAKE_DNS"
+        return 1
+    }
 
     for command_name in nslookup nft; do
         have "$command_name" || {
@@ -278,7 +300,9 @@ restore_from_backup() {
         rm -f "$FIX_CONF"
     fi
 
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || return 1
+    sleep 2
+    /etc/init.d/dnsmasq status >/dev/null 2>&1
 }
 
 router_returns_real_routed_ips() {
@@ -286,23 +310,50 @@ router_returns_real_routed_ips() {
 }
 
 fakeip_engine_still_works() {
-    answer="$(lookup_ipv4 "$PROBE_NAME" 127.0.0.42)"
-    is_ipv4 "$answer" || return 1
-    is_fake_ipv4 "$answer"
+    FAKEIP_PROBE_RESULT="no_ipv4_answer"
+    fakeip_answer="$(lookup_ipv4 "$PROBE_NAME" "$FAKE_DNS")"
+    [ -n "$fakeip_answer" ] || return 1
+
+    if ! is_ipv4 "$fakeip_answer"; then
+        FAKEIP_PROBE_RESULT="invalid_ipv4_answer"
+        return 1
+    fi
+    if ! is_fake_ipv4 "$fakeip_answer"; then
+        FAKEIP_PROBE_RESULT="not_fake"
+        return 1
+    fi
+
+    FAKEIP_PROBE_RESULT="active"
+    return 0
 }
 
 wait_for_postcheck() {
-    real_ok=0
-    fake_ok=0
+    POSTCHECK_REAL_OK=0
+    POSTCHECK_FAKE_OK=0
     attempt=0
 
     while [ "$attempt" -lt 6 ]; do
-        router_returns_real_routed_ips && real_ok=1
-        fakeip_engine_still_works && fake_ok=1
-        [ "$real_ok" = "1" ] && [ "$fake_ok" = "1" ] && return 0
+        POSTCHECK_REAL_OK=0
+        POSTCHECK_FAKE_OK=0
+        router_returns_real_routed_ips && POSTCHECK_REAL_OK=1
+        fakeip_engine_still_works && POSTCHECK_FAKE_OK=1
+        [ "$POSTCHECK_REAL_OK" = "1" ] && [ "$POSTCHECK_FAKE_OK" = "1" ] && return 0
         attempt=$((attempt + 1))
         sleep 2
     done
+    return 1
+}
+
+rollback_apply_failure() {
+    failure_code="$1"
+
+    if restore_from_backup "$BACKUP_DIR"; then
+        say "rollback:verified" >&2
+        fail "${failure_code}_rolled_back"
+    else
+        say "backup:$BACKUP_DIR" >&2
+        fail "${failure_code}_rollback_failed_manual_recovery_required"
+    fi
     return 1
 }
 
@@ -318,6 +369,7 @@ write_state() {
     uci set "$STATE_PACKAGE.settings.version=$STATE_VERSION" || return 1
     uci set "$STATE_PACKAGE.settings.mode=confdir" || return 1
     uci set "$STATE_PACKAGE.settings.resolver=$RESOLVER" || return 1
+    uci set "$STATE_PACKAGE.settings.fake_dns=$FAKE_DNS" || return 1
     uci set "$STATE_PACKAGE.settings.backup_dir=$BACKUP_DIR" || return 1
     uci -q delete "$STATE_PACKAGE.settings.rule" || true
 
@@ -384,33 +436,38 @@ apply_fix() {
     }
 
     write_fix_conf || {
-        restore_from_backup "$BACKUP_DIR"
-        fail "dnsmasq_conf_test_failed_rolled_back"
+        rollback_apply_failure "dnsmasq_conf_test_failed"
         return 1
     }
 
     write_state "$old_confdir_added" "$old_rules" || {
-        restore_from_backup "$BACKUP_DIR"
-        fail "uci_write_failed_rolled_back"
+        rollback_apply_failure "uci_write_failed"
         return 1
     }
 
     if ! uci commit "$STATE_PACKAGE" || ! uci commit dhcp; then
-        restore_from_backup "$BACKUP_DIR"
-        fail "uci_commit_failed_rolled_back"
+        rollback_apply_failure "uci_commit_failed"
         return 1
     fi
     chmod 600 "$STATE_FILE" 2>/dev/null || true
 
     /etc/init.d/dnsmasq restart >/dev/null 2>&1 || {
-        restore_from_backup "$BACKUP_DIR"
-        fail "dnsmasq_restart_failed_rolled_back"
+        rollback_apply_failure "dnsmasq_restart_failed"
         return 1
     }
 
     if ! wait_for_postcheck; then
-        restore_from_backup "$BACKUP_DIR"
-        fail "postcheck_failed_rolled_back"
+        [ "$POSTCHECK_REAL_OK" = "1" ] || say "postcheck:dnsmasq_whatsapp_answer_failed" >&2
+        [ "$POSTCHECK_FAKE_OK" = "1" ] || say "postcheck:sing_box_fakeip_engine_failed_$FAKEIP_PROBE_RESULT" >&2
+
+        if [ "$POSTCHECK_REAL_OK" != "1" ] && [ "$POSTCHECK_FAKE_OK" != "1" ]; then
+            postcheck_failure="dnsmasq_and_fakeip_postcheck_failed"
+        elif [ "$POSTCHECK_REAL_OK" != "1" ]; then
+            postcheck_failure="dnsmasq_postcheck_failed"
+        else
+            postcheck_failure="fakeip_engine_postcheck_failed"
+        fi
+        rollback_apply_failure "$postcheck_failure"
         return 1
     fi
 
@@ -474,7 +531,7 @@ status_fix() {
     if fakeip_engine_still_works; then
         say "sing_box_fakeip_engine:unchanged"
     else
-        say "sing_box_fakeip_engine:unexpected"
+        say "sing_box_fakeip_engine:failed_$FAKEIP_PROBE_RESULT"
         return 1
     fi
     return 0
@@ -501,10 +558,15 @@ check_fix() {
         fail "no_safe_real_dns_resolver"
         return 1
     }
+    fakeip_engine_still_works || {
+        fail "fakeip_control_dns_failed_$FAKEIP_PROBE_RESULT"
+        return 1
+    }
 
     say "preflight:ok"
     say "real_dns_answer:available"
     say "all_real_ipv4_routes:podkop"
+    say "sing_box_fakeip_engine:active"
 
     current="$(lookup_ipv4 "$PROBE_NAME" 127.0.0.1)"
     if is_fake_ipv4 "$current"; then
@@ -579,6 +641,10 @@ Usage: whatsapp-real-dns-fix.sh {check|apply|status|rollback}
 Optional resolver override:
   REAL_DNS=1.2.3.4 ./whatsapp-real-dns-fix.sh check
   REAL_DNS=1.2.3.4 ./whatsapp-real-dns-fix.sh apply
+
+Optional sing-box FakeIP DNS override (default: 127.0.0.42):
+  FAKE_DNS=127.0.0.54 ./whatsapp-real-dns-fix.sh check
+  FAKE_DNS=127.0.0.54 ./whatsapp-real-dns-fix.sh apply
 EOF
 }
 
@@ -596,6 +662,7 @@ esac
 
 require_root || exit 1
 acquire_lock || exit 1
+load_state_fake_dns
 
 case "$1" in
     check) check_fix ;;

@@ -63,7 +63,21 @@ whatsapp-real-dns-fix check
 preflight:ok
 real_dns_answer:available
 all_real_ipv4_routes:podkop
+sing_box_fakeip_engine:active
 ```
+
+Если стандартный контрольный DNS sing-box `127.0.0.42` не отвечает, `check`
+теперь останавливается до любых изменений с ошибкой
+`fakeip_control_dns_failed_*`. Для подтверждённой нестандартной схемы можно
+указать другой локальный FakeIP DNS одинаково в обеих командах:
+
+```sh
+FAKE_DNS=127.0.0.54 whatsapp-real-dns-fix check
+FAKE_DNS=127.0.0.54 whatsapp-real-dns-fix apply
+```
+
+Выбранный адрес сохраняется в managed state. Не используйте здесь обычный
+публичный DNS — контрольный адрес должен возвращать FakeIP.
 
 Применение:
 
@@ -77,6 +91,13 @@ whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 whatsapp-real-dns-fix rollback
 ```
+
+При неудачном postcheck скрипт отдельно указывает сбой dnsmasq и/или FakeIP.
+`rollback:verified` означает, что исходная конфигурация восстановлена и dnsmasq
+проверен. Ошибка с суффиксом `_rollback_failed_manual_recovery_required`
+требует остановиться и выполнить ручное восстановление из показанного бэкапа.
+Строка `upgrade: Saving config files...` означает создание бэкапа и не является
+ошибкой.
 
 После успешного `apply` обновите DNS-состояние на проблемном устройстве —
 например, переподключите сеть или перезапустите приложение — и проверьте текст,

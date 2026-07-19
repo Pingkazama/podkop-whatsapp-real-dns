@@ -16,7 +16,9 @@ Run these checks before submitting a pull request:
 ```sh
 sh -n install.sh
 sh -n whatsapp-real-dns-fix.sh
-shellcheck -s sh install.sh whatsapp-real-dns-fix.sh
+sh -n tests/test-whatsapp-real-dns-fix.sh
+shellcheck -s sh install.sh whatsapp-real-dns-fix.sh tests/test-whatsapp-real-dns-fix.sh
+sh tests/test-whatsapp-real-dns-fix.sh
 ```
 
 Do not include private router configurations or copied third-party IP lists.

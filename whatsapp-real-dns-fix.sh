@@ -11,7 +11,9 @@ set -u
 
 STATE_PACKAGE="whatsapp_real_dns"
 STATE_FILE="/etc/config/$STATE_PACKAGE"
-STATE_VERSION="3"
+STATE_VERSION="4"
+DHCP_CONFIG="/etc/config/dhcp"
+DNSMASQ_INIT="/etc/init.d/dnsmasq"
 DNSMASQ_SECTION="dhcp.@dnsmasq[0]"
 FIX_DIR="/etc/config/dnsmasq.d"
 FIX_CONF="$FIX_DIR/90-whatsapp-real-dns.conf"
@@ -20,6 +22,7 @@ PROBE_NAME="api.whatsapp.net"
 BACKUP_ROOT="/root/whatsapp-real-dns-backups"
 LOCK_DIR="/tmp/whatsapp-real-dns-fix.lock"
 DEFAULT_FAKE_DNS="127.0.0.42"
+RESOLVER_PROBE_ATTEMPTS="3"
 
 FAKE_DNS_EXPLICIT=0
 if [ "${FAKE_DNS+x}" = "x" ]; then
@@ -39,6 +42,10 @@ fail() {
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+dnsmasq_service() {
+    "$DNSMASQ_INIT" "$@"
 }
 
 load_state_fake_dns() {
@@ -109,26 +116,76 @@ podkop_routes_ip() {
     nft get element inet PodkopTable podkop_subnets "{ $1 }" >/dev/null 2>&1
 }
 
-all_answers_are_real_and_routed() {
+probe_real_dns_answers() {
+    REAL_DNS_PROBE_RESULT="no_ipv4_answer"
+    REAL_DNS_IPV4_COUNT=0
+    REAL_DNS_FAKE_COUNT=0
+    REAL_DNS_UNROUTED_COUNT=0
+
     answers="$(lookup_ipv4_all "$1" "$2")"
     [ -n "$answers" ] || return 1
 
     for answer in $answers; do
-        is_ipv4 "$answer" || return 1
-        is_fake_ipv4 "$answer" && return 1
-        podkop_routes_ip "$answer" || return 1
+        if ! is_ipv4 "$answer"; then
+            REAL_DNS_PROBE_RESULT="invalid_ipv4_answer"
+            return 1
+        fi
+
+        REAL_DNS_IPV4_COUNT=$((REAL_DNS_IPV4_COUNT + 1))
+        if is_fake_ipv4 "$answer"; then
+            REAL_DNS_FAKE_COUNT=$((REAL_DNS_FAKE_COUNT + 1))
+        elif ! podkop_routes_ip "$answer"; then
+            REAL_DNS_UNROUTED_COUNT=$((REAL_DNS_UNROUTED_COUNT + 1))
+        fi
+    done
+
+    if [ "$REAL_DNS_FAKE_COUNT" -gt 0 ]; then
+        REAL_DNS_PROBE_RESULT="fake_ipv4_answer"
+        return 1
+    fi
+    if [ "$REAL_DNS_UNROUTED_COUNT" -gt 0 ]; then
+        REAL_DNS_PROBE_RESULT="real_ipv4_not_routed"
+        return 1
+    fi
+
+    REAL_DNS_PROBE_RESULT="all_real_routed"
+    return 0
+}
+
+probe_real_dns_repeatedly() {
+    probe_name="$1"
+    probe_server="$2"
+    probe_attempt=0
+
+    while [ "$probe_attempt" -lt "$RESOLVER_PROBE_ATTEMPTS" ]; do
+        probe_real_dns_answers "$probe_name" "$probe_server" || return 1
+        probe_attempt=$((probe_attempt + 1))
+        [ "$probe_attempt" -ge "$RESOLVER_PROBE_ATTEMPTS" ] || sleep 1
     done
     return 0
 }
 
+print_real_dns_probe_diagnostic() {
+    diagnostic_prefix="$1"
+    say "$diagnostic_prefix:$REAL_DNS_PROBE_RESULT" >&2
+    say "$diagnostic_prefix:ipv4=$REAL_DNS_IPV4_COUNT,fake=$REAL_DNS_FAKE_COUNT,unrouted=$REAL_DNS_UNROUTED_COUNT" >&2
+}
+
 resolver_is_safe() {
     candidate="$1"
-    is_ipv4 "$candidate" || return 1
-    all_answers_are_real_and_routed "$PROBE_NAME" "$candidate"
+    is_ipv4 "$candidate" || {
+        REAL_DNS_PROBE_RESULT="invalid_resolver"
+        return 1
+    }
+    probe_real_dns_repeatedly "$PROBE_NAME" "$candidate"
 }
 
 choose_resolver() {
     RESOLVER=""
+    REAL_DNS_PROBE_RESULT="no_resolver_candidate"
+    REAL_DNS_IPV4_COUNT=0
+    REAL_DNS_FAKE_COUNT=0
+    REAL_DNS_UNROUTED_COUNT=0
 
     if [ -n "${REAL_DNS:-}" ] && resolver_is_safe "$REAL_DNS"; then
         RESOLVER="$REAL_DNS"
@@ -148,14 +205,14 @@ choose_resolver() {
 }
 
 preflight_basic() {
-    for command_name in uci awk grep tr dnsmasq sysupgrade; do
+    for command_name in uci awk grep tr dnsmasq; do
         have "$command_name" || {
             fail "missing_command_$command_name"
             return 1
         }
     done
 
-    [ -x /etc/init.d/dnsmasq ] || {
+    [ -x "$DNSMASQ_INIT" ] || {
         fail "dnsmasq_init_missing"
         return 1
     }
@@ -202,9 +259,25 @@ state_enabled() {
     [ "$value" = "1" ]
 }
 
+managed_state_version_supported() {
+    case "$1" in
+        ''|2|3|"$STATE_VERSION") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+managed_installation_is_current() {
+    [ "$1" = "$STATE_VERSION" ] && [ -f "$FIX_CONF" ] && has_fix_confdir
+}
+
 has_fix_confdir() {
     uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null |
         tr ' ' '\n' | grep -Fx "$FIX_DIR" >/dev/null 2>&1
+}
+
+confdir_is_compatible() {
+    current_confdir="$(uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null || true)"
+    [ -z "$current_confdir" ] || [ "$current_confdir" = "$FIX_DIR" ]
 }
 
 has_unmanaged_domain_conflict() {
@@ -233,14 +306,20 @@ write_fix_conf() {
     : > "$temp_conf" || return 1
 
     for domain in $DOMAINS; do
-        printf 'server=/%s/%s\n' "$domain" "$RESOLVER" >> "$temp_conf" || return 1
+        printf 'server=/%s/%s\n' "$domain" "$RESOLVER" >> "$temp_conf" || {
+            rm -f "$temp_conf"
+            return 1
+        }
     done
 
     dnsmasq --test --conf-file="$temp_conf" >/dev/null 2>&1 || {
         rm -f "$temp_conf"
         return 1
     }
-    mv "$temp_conf" "$FIX_CONF" || return 1
+    mv "$temp_conf" "$FIX_CONF" || {
+        rm -f "$temp_conf"
+        return 1
+    }
     chmod 600 "$FIX_CONF" 2>/dev/null || true
     return 0
 }
@@ -267,16 +346,37 @@ make_backup() {
     mkdir -p "$BACKUP_DIR" || return 1
     chmod 700 "$BACKUP_ROOT" "$BACKUP_DIR" 2>/dev/null || true
 
-    cp -p /etc/config/dhcp "$BACKUP_DIR/dhcp" || return 1
-    [ ! -f /etc/config/podkop ] || cp -p /etc/config/podkop "$BACKUP_DIR/podkop" || return 1
-    [ ! -f "$STATE_FILE" ] || cp -p "$STATE_FILE" "$BACKUP_DIR/state" || return 1
-    [ ! -f "$FIX_CONF" ] || cp -p "$FIX_CONF" "$BACKUP_DIR/fix-conf" || return 1
+    if ! cp -p "$DHCP_CONFIG" "$BACKUP_DIR/dhcp" ||
+        { [ -f "$STATE_FILE" ] && ! cp -p "$STATE_FILE" "$BACKUP_DIR/state"; } ||
+        { [ -f "$FIX_CONF" ] && ! cp -p "$FIX_CONF" "$BACKUP_DIR/fix-conf"; }; then
+        cleanup_incomplete_backup
+        return 1
+    fi
 
-    sysupgrade -b "$BACKUP_DIR/sysupgrade-config.tar.gz" >/dev/null || return 1
-    [ -s "$BACKUP_DIR/sysupgrade-config.tar.gz" ] || return 1
-    chmod 600 "$BACKUP_DIR/sysupgrade-config.tar.gz" 2>/dev/null || true
-    printf '%s\n' "$BACKUP_DIR" > "$BACKUP_ROOT/latest"
+    printf '%s\n' "minimal-v1" > "$BACKUP_DIR/format" || {
+        cleanup_incomplete_backup
+        return 1
+    }
+    chmod 600 "$BACKUP_DIR"/* 2>/dev/null || true
+
+    latest_tmp="$BACKUP_ROOT/latest.tmp.$$"
+    if ! printf '%s\n' "$BACKUP_DIR" > "$latest_tmp" ||
+        ! mv "$latest_tmp" "$BACKUP_ROOT/latest"; then
+        rm -f "$latest_tmp"
+        cleanup_incomplete_backup
+        return 1
+    fi
     return 0
+}
+
+cleanup_incomplete_backup() {
+    [ -n "${BACKUP_DIR:-}" ] || return 0
+    rm -f \
+        "$BACKUP_DIR/dhcp" \
+        "$BACKUP_DIR/state" \
+        "$BACKUP_DIR/fix-conf" \
+        "$BACKUP_DIR/format"
+    rmdir "$BACKUP_DIR" 2>/dev/null || true
 }
 
 restore_from_backup() {
@@ -285,7 +385,7 @@ restore_from_backup() {
 
     uci -q revert dhcp >/dev/null 2>&1 || true
     uci -q revert "$STATE_PACKAGE" >/dev/null 2>&1 || true
-    cp -p "$backup_dir/dhcp" /etc/config/dhcp || return 1
+    cp -p "$backup_dir/dhcp" "$DHCP_CONFIG" || return 1
 
     if [ -f "$backup_dir/state" ]; then
         cp -p "$backup_dir/state" "$STATE_FILE" || return 1
@@ -300,13 +400,32 @@ restore_from_backup() {
         rm -f "$FIX_CONF"
     fi
 
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || return 1
+    dnsmasq_service restart >/dev/null 2>&1 || return 1
     sleep 2
-    /etc/init.d/dnsmasq status >/dev/null 2>&1
+    dnsmasq_service status >/dev/null 2>&1
 }
 
 router_returns_real_routed_ips() {
-    all_answers_are_real_and_routed "$PROBE_NAME" 127.0.0.1
+    if ! dnsmasq_service status >/dev/null 2>&1; then
+        REAL_DNS_PROBE_RESULT="dnsmasq_not_running"
+        REAL_DNS_IPV4_COUNT=0
+        REAL_DNS_FAKE_COUNT=0
+        REAL_DNS_UNROUTED_COUNT=0
+        return 1
+    fi
+    probe_real_dns_answers "$PROBE_NAME" 127.0.0.1
+}
+
+runtime_confdir_detected() {
+    for generated_conf in \
+        /var/etc/dnsmasq.conf.* \
+        /tmp/etc/dnsmasq.conf.* \
+        /tmp/dnsmasq.conf.* \
+        /tmp/dnsmasq.conf.*/*; do
+        [ -f "$generated_conf" ] || continue
+        grep -F "conf-dir=$FIX_DIR" "$generated_conf" >/dev/null 2>&1 && return 0
+    done
+    return 1
 }
 
 fakeip_engine_still_works() {
@@ -338,9 +457,20 @@ wait_for_postcheck() {
         router_returns_real_routed_ips && POSTCHECK_REAL_OK=1
         fakeip_engine_still_works && POSTCHECK_FAKE_OK=1
         [ "$POSTCHECK_REAL_OK" = "1" ] && [ "$POSTCHECK_FAKE_OK" = "1" ] && return 0
+
+        case "$REAL_DNS_PROBE_RESULT" in
+            real_ipv4_not_routed|invalid_ipv4_answer)
+                break
+                ;;
+        esac
         attempt=$((attempt + 1))
         sleep 2
     done
+    if runtime_confdir_detected; then
+        POSTCHECK_RUNTIME_CONFDIR="detected"
+    else
+        POSTCHECK_RUNTIME_CONFDIR="not_detected"
+    fi
     return 1
 }
 
@@ -374,9 +504,10 @@ write_state() {
     uci -q delete "$STATE_PACKAGE.settings.rule" || true
 
     if has_fix_confdir; then
+        uci set "$DNSMASQ_SECTION.confdir=$FIX_DIR" || return 1
         uci set "$STATE_PACKAGE.settings.confdir_added=$old_confdir_added" || return 1
     else
-        uci add_list "$DNSMASQ_SECTION.confdir=$FIX_DIR" || return 1
+        uci set "$DNSMASQ_SECTION.confdir=$FIX_DIR" || return 1
         uci set "$STATE_PACKAGE.settings.confdir_added=1" || return 1
     fi
 
@@ -390,6 +521,11 @@ write_state() {
 apply_fix() {
     preflight || return 1
 
+    confdir_is_compatible || {
+        fail "existing_dnsmasq_confdir_conflict"
+        return 1
+    }
+
     managed_before=0
     installed_version=""
     old_confdir_added=0
@@ -398,11 +534,15 @@ apply_fix() {
     if state_enabled; then
         managed_before=1
         installed_version="$(uci -q get "$STATE_PACKAGE.settings.version" 2>/dev/null || true)"
+        managed_state_version_supported "$installed_version" || {
+            fail "unsupported_managed_state_version"
+            return 1
+        }
         old_confdir_added="$(uci -q get "$STATE_PACKAGE.settings.confdir_added" 2>/dev/null || echo 0)"
         old_rules="$(uci -q get "$STATE_PACKAGE.settings.rule" 2>/dev/null || true)"
         RESOLVER="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
 
-        if [ "$installed_version" = "$STATE_VERSION" ] && [ -f "$FIX_CONF" ] && has_fix_confdir; then
+        if managed_installation_is_current "$installed_version"; then
             say "result:already_installed"
             status_fix
             return $?
@@ -410,6 +550,7 @@ apply_fix() {
 
         if ! resolver_is_safe "$RESOLVER"; then
             choose_resolver || {
+                print_real_dns_probe_diagnostic "resolver_probe"
                 fail "no_safe_real_dns_resolver"
                 return 1
             }
@@ -424,6 +565,7 @@ apply_fix() {
             return 1
         fi
         choose_resolver || {
+            print_real_dns_probe_diagnostic "resolver_probe"
             fail "no_safe_real_dns_resolver"
             return 1
         }
@@ -451,13 +593,16 @@ apply_fix() {
     fi
     chmod 600 "$STATE_FILE" 2>/dev/null || true
 
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || {
+    dnsmasq_service restart >/dev/null 2>&1 || {
         rollback_apply_failure "dnsmasq_restart_failed"
         return 1
     }
 
     if ! wait_for_postcheck; then
-        [ "$POSTCHECK_REAL_OK" = "1" ] || say "postcheck:dnsmasq_whatsapp_answer_failed" >&2
+        if [ "$POSTCHECK_REAL_OK" != "1" ]; then
+            print_real_dns_probe_diagnostic "postcheck:dnsmasq_whatsapp_answer"
+            say "postcheck:dnsmasq_runtime_confdir_$POSTCHECK_RUNTIME_CONFDIR" >&2
+        fi
         [ "$POSTCHECK_FAKE_OK" = "1" ] || say "postcheck:sing_box_fakeip_engine_failed_$FAKEIP_PROBE_RESULT" >&2
 
         if [ "$POSTCHECK_REAL_OK" != "1" ] && [ "$POSTCHECK_FAKE_OK" != "1" ]; then
@@ -509,7 +654,7 @@ status_fix() {
         say "storage:confdir_restart_safe"
     fi
 
-    /etc/init.d/dnsmasq status >/dev/null 2>&1 || {
+    dnsmasq_service status >/dev/null 2>&1 || {
         say "dnsmasq:failed"
         return 1
     }
@@ -524,7 +669,7 @@ status_fix() {
     if router_returns_real_routed_ips; then
         say "dnsmasq_whatsapp_answer:all_real_routed_via_podkop"
     else
-        say "dnsmasq_whatsapp_answer:failed"
+        print_real_dns_probe_diagnostic "dnsmasq_whatsapp_answer"
         return 1
     fi
 
@@ -540,10 +685,45 @@ status_fix() {
 check_fix() {
     preflight || return 1
 
+    confdir_is_compatible || {
+        fail "existing_dnsmasq_confdir_conflict"
+        return 1
+    }
+
     if state_enabled; then
         say "existing_config:detected"
-        status_fix
-        return $?
+        installed_version="$(uci -q get "$STATE_PACKAGE.settings.version" 2>/dev/null || true)"
+        managed_state_version_supported "$installed_version" || {
+            fail "unsupported_managed_state_version"
+            return 1
+        }
+
+        if managed_installation_is_current "$installed_version"; then
+            status_fix
+            return $?
+        fi
+
+        RESOLVER="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
+        if ! resolver_is_safe "$RESOLVER"; then
+            choose_resolver || {
+                print_real_dns_probe_diagnostic "resolver_probe"
+                fail "no_safe_real_dns_resolver"
+                return 1
+            }
+        fi
+        fakeip_engine_still_works || {
+            fail "fakeip_control_dns_failed_$FAKEIP_PROBE_RESULT"
+            return 1
+        }
+
+        say "existing_config:upgrade_supported"
+        say "existing_config:source_state_v${installed_version:-manual}"
+        say "preflight:ok"
+        say "real_dns_answer:available"
+        say "all_real_ipv4_routes:podkop"
+        say "sing_box_fakeip_engine:active"
+        say "upgrade:ready"
+        return 0
     fi
 
     [ ! -e "$STATE_FILE" ] || {
@@ -555,6 +735,7 @@ check_fix() {
         return 1
     fi
     choose_resolver || {
+        print_real_dns_probe_diagnostic "resolver_probe"
         fail "no_safe_real_dns_resolver"
         return 1
     }
@@ -601,7 +782,12 @@ rollback_fix() {
     rm -f "$FIX_CONF"
 
     if [ "$confdir_added" = "1" ]; then
-        uci -q del_list "$DNSMASQ_SECTION.confdir=$FIX_DIR" || true
+        current_confdir="$(uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null || true)"
+        if [ "$current_confdir" = "$FIX_DIR" ]; then
+            uci -q delete "$DNSMASQ_SECTION.confdir" || true
+        else
+            uci -q del_list "$DNSMASQ_SECTION.confdir=$FIX_DIR" || true
+        fi
         rmdir "$FIX_DIR" 2>/dev/null || true
     fi
 
@@ -612,13 +798,13 @@ rollback_fix() {
     }
     rm -f "$STATE_FILE"
 
-    /etc/init.d/dnsmasq restart >/dev/null 2>&1 || {
+    dnsmasq_service restart >/dev/null 2>&1 || {
         restore_from_backup "$BACKUP_DIR"
         fail "rollback_dnsmasq_restart_failed_restored"
         return 1
     }
     sleep 2
-    /etc/init.d/dnsmasq status >/dev/null 2>&1 || {
+    dnsmasq_service status >/dev/null 2>&1 || {
         restore_from_backup "$BACKUP_DIR"
         fail "rollback_dnsmasq_not_running_restored"
         return 1

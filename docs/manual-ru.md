@@ -174,7 +174,7 @@ uci add_list dhcp.@dnsmasq[0].server='/whatsapp.net/REAL_DNS_IP'
 ## Автоматический вариант
 
 В этом же каталоге лежит нейтральный скрипт
-[`whatsapp-real-dns-fix.sh`](../whatsapp-real-dns-fix.sh). Он выполняет описанную
+[`whatsapp-real-dns-fix.sh`](whatsapp-real-dns-fix.sh). Он выполняет описанную
 ниже процедуру автоматически, но сохраняет те же проверки и формат файлов.
 
 Скопируйте его на роутер:
@@ -217,16 +217,53 @@ sing_box_fakeip_engine:active
 1. проверит OpenWrt, dnsmasq, Podkop, sing-box, контрольный FakeIP DNS и
    nftables;
 2. выберет обычный DNS IPv4 из настроек Podkop;
-3. проверит все реальные IPv4 WhatsApp в `podkop_subnets`;
-4. создаст root-only бэкап и полный `sysupgrade -b` архив;
+3. несколько раз проверит меняющиеся реальные IPv4 WhatsApp в
+   `podkop_subnets`;
+4. создаст небольшой root-only бэкап только тех файлов, которые сам меняет;
 5. создаст нейтральный conf-файл и UCI state;
 6. перезапустит только dnsmasq;
 7. проверит реальные DNS-ответы, маршрутизацию и сохранение общего FakeIP;
-8. автоматически восстановит исходный DHCP-конфиг, если финальный тест не
+8. при ошибке отдельно укажет отсутствие DNS-ответа, оставшийся FakeIP,
+   реальный IP вне `podkop_subnets` или остановившийся dnsmasq;
+9. автоматически восстановит исходный DHCP-конфиг, если финальный тест не
    пройдёт, и сообщит об откате только после проверки dnsmasq.
 
-Сообщение `upgrade: Saving config files...` во время `apply` относится к
-созданию `sysupgrade`-бэкапа и само по себе не является ошибкой.
+Автоматический вариант намеренно не создаёт полный `sysupgrade`-архив на самом
+роутере. Такой архив может включать крупные пользовательские файлы из `/root`
+и заполнить небольшой OpenWrt overlay ещё до применения исправления.
+Существующие архивы от старых запусков автоматически не удаляются: сначала
+проверьте и при необходимости сохраните их вне роутера.
+
+### Обновление ранней автоматической версии
+
+Если уже установлена v1.0.0 или v1.0.1, сначала откатывать либо удалять её
+DNS-конфигурацию не нужно. Установщик актуального релиза проверяет SHA256 и
+синтаксис во временном каталоге, затем атомарно заменяет только
+`/usr/bin/whatsapp-real-dns-fix`. При сбое финальной замены старый исполняемый
+файл остаётся на месте; DNS-конфигурацию установщик не трогает.
+
+После обновления инструмента выполните:
+
+```sh
+whatsapp-real-dns-fix check
+whatsapp-real-dns-fix apply
+whatsapp-real-dns-fix status
+```
+
+Для выпущенных managed state v2/v3 команда `check` выполняет безопасные проверки
+резолвера, маршрутов и FakeIP и печатает:
+
+```text
+existing_config:upgrade_supported
+existing_config:source_state_v2
+upgrade:ready
+```
+
+Для v1.0.1 номер будет `v3`. Затем `apply` сначала сохраняет DHCP state и старый
+файл правила в минимальный бэкап, заменяет старый UCI-list `confdir` на scalar
+option с тем же управляемым путём и мигрирует конфигурацию в state v4.
+Неизвестная версия state останавливается до записи файлов с ошибкой
+`error:unsupported_managed_state_version`.
 
 Проверка уже установленного исправления:
 
@@ -445,29 +482,31 @@ chmod 700 "$BACKUP_DIR"
 cp -p /etc/config/dhcp "$BACKUP_DIR/dhcp"
 ```
 
-Если дополнительный каталог уже существовал, сохраняем и его:
+Если файл исправления уже существовал, сохраняем только его:
 
 ```sh
-if [ -d /etc/config/dnsmasq.d ]; then
-    cp -a /etc/config/dnsmasq.d "$BACKUP_DIR/dnsmasq.d"
+if [ -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf ]; then
+    cp -p /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf \
+        "$BACKUP_DIR/fix-conf"
 fi
 ```
 
-Создаём полный стандартный конфигурационный архив OpenWrt:
-
-```sh
-sysupgrade -b "$BACKUP_DIR/sysupgrade-config.tar.gz"
-chmod 600 "$BACKUP_DIR/sysupgrade-config.tar.gz"
-```
-
-Проверяем результат:
+Этих файлов достаточно для отката именно данного исправления. Проверяем
+результат:
 
 ```sh
 ls -la "$BACKUP_DIR"
-test -s "$BACKUP_DIR/sysupgrade-config.tar.gz" && echo "Бэкап создан"
+test -s "$BACKUP_DIR/dhcp" && echo "Минимальный бэкап создан"
 ```
 
-> Архив `sysupgrade-config.tar.gz` может содержать пароли, ключи и другие
+Если нужен ещё и полный системный бэкап, не сохраняйте его на маленький overlay.
+Запустите следующую команду на доверенном компьютере, заменив адрес роутера:
+
+```sh
+ssh root@OPENWRT_IP 'sysupgrade -b -' > openwrt-config-backup.tar.gz
+```
+
+> Архив `openwrt-config-backup.tar.gz` может содержать пароли, ключи и другие
 > приватные настройки. Не публикуйте и не отправляйте его посторонним.
 
 ## Шаг 5. Создаём отдельный конфигурационный файл dnsmasq
@@ -514,28 +553,36 @@ dnsmasq --test \
 
 ## Шаг 6. Подключаем confdir через UCI
 
-Сначала проверяем, не подключён ли каталог ранее:
+Сначала читаем текущее значение:
 
 ```sh
-uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null |
-    tr ' ' '\n' |
-    grep -Fx /etc/config/dnsmasq.d
+CURRENT_CONFDIR="$(
+    uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true
+)"
+printf 'Текущий confdir: %s\n' "${CURRENT_CONFDIR:-<не задан>}"
 ```
 
-Если команда вывела `/etc/config/dnsmasq.d`, повторно добавлять значение не
-нужно. Запоминаем это в переменной:
+Продолжаем только если значение не задано либо уже равно
+`/etc/config/dnsmasq.d`. Чужой `confdir` автоматически не объединяем и не
+перезаписываем:
 
 ```sh
-if uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null |
-    tr ' ' '\n' |
-    grep -Fx /etc/config/dnsmasq.d >/dev/null 2>&1; then
-    CONFDIR_ADDED=0
-    echo "confdir уже существовал"
-else
-    uci add_list dhcp.@dnsmasq[0].confdir='/etc/config/dnsmasq.d'
-    CONFDIR_ADDED=1
-    echo "confdir добавлен"
-fi
+case "$CURRENT_CONFDIR" in
+    '')
+        uci set dhcp.@dnsmasq[0].confdir='/etc/config/dnsmasq.d'
+        CONFDIR_ADDED=1
+        echo "confdir добавлен"
+        ;;
+    /etc/config/dnsmasq.d)
+        CONFDIR_ADDED=0
+        echo "confdir уже существовал"
+        ;;
+    *)
+        echo "СТОП: уже настроен другой confdir: $CURRENT_CONFDIR"
+        echo "Не продолжайте без отдельного плана интеграции"
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
 ```
 
 Создаём небольшой нейтральный state-файл. Он нужен только для понятного ручного
@@ -745,8 +792,12 @@ rm -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
 
 ```sh
 if [ "$CONFDIR_ADDED" = "1" ]; then
-    uci -q del_list \
-        dhcp.@dnsmasq[0].confdir='/etc/config/dnsmasq.d' || true
+    CURRENT_CONFDIR="$(
+        uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true
+    )"
+    if [ "$CURRENT_CONFDIR" = "/etc/config/dnsmasq.d" ]; then
+        uci -q delete dhcp.@dnsmasq[0].confdir || true
+    fi
 fi
 ```
 
@@ -809,17 +860,16 @@ rm -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
 rm -f /etc/config/whatsapp_real_dns
 ```
 
-Если до изменения существовал каталог `dnsmasq.d`, восстанавливаем его:
+Если до изменения существовал именно файл правила, восстанавливаем его. Другие
+файлы каталога не перемещаем и не перезаписываем:
 
 ```sh
-if [ -d "$BACKUP_DIR/dnsmasq.d" ]; then
-    if [ -d /etc/config/dnsmasq.d ]; then
-        FAILED_DIR="$BACKUP_DIR/dnsmasq.d.failed-$(date +%H%M%S)"
-        mv /etc/config/dnsmasq.d "$FAILED_DIR"
-        echo "Неудачная версия сохранена в $FAILED_DIR"
-    fi
-    cp -a "$BACKUP_DIR/dnsmasq.d" /etc/config/dnsmasq.d
+if [ -f "$BACKUP_DIR/fix-conf" ]; then
+    mkdir -p /etc/config/dnsmasq.d
+    cp -p "$BACKUP_DIR/fix-conf" \
+        /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
 else
+    rm -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
     rmdir /etc/config/dnsmasq.d 2>/dev/null || true
 fi
 ```
@@ -832,18 +882,27 @@ sleep 3
 /etc/init.d/dnsmasq status
 ```
 
-Если требуется восстановить весь конфигурационный архив OpenWrt, используйте
-стандартную процедуру `sysupgrade -r`, но обычно для этого исправления достаточно
-вернуть `/etc/config/dhcp` и каталог `dnsmasq.d`.
+Если полный конфигурационный архив был отдельно сохранён на доверенном
+компьютере, его можно использовать по стандартной процедуре `sysupgrade -r`.
+Для отката данного исправления обычно достаточно вернуть `/etc/config/dhcp` и
+его прежний файл правила.
 
 ## Типовые проблемы
 
 ### `apply` сообщает об ошибке postcheck
 
-Скрипт теперь печатает отдельную диагностическую строку перед откатом:
+Скрипт печатает причину и безопасные счётчики перед откатом, не раскрывая сами
+IP-адреса:
 
-- `postcheck:dnsmasq_whatsapp_answer_failed` — dnsmasq не вернул только реальные
-  IPv4, либо хотя бы один адрес не вошёл в `podkop_subnets`;
+- `postcheck:dnsmasq_whatsapp_answer:no_ipv4_answer` — dnsmasq не вернул IPv4;
+- `postcheck:dnsmasq_whatsapp_answer:fake_ipv4_answer` — dnsmasq продолжил
+  возвращать FakeIP;
+- `postcheck:dnsmasq_whatsapp_answer:real_ipv4_not_routed` — хотя бы один
+  реальный IPv4 отсутствует в `podkop_subnets`; это терминальная проверка,
+  поэтому скрипт не ждёт следующего DNS-ответа и сразу переходит к откату;
+- `postcheck:dnsmasq_whatsapp_answer:dnsmasq_not_running` — dnsmasq остановился;
+- `postcheck:dnsmasq_runtime_confdir_detected` или суффикс `not_detected`
+  показывает, найден ли каталог исправления в сгенерированной конфигурации;
 - `postcheck:sing_box_fakeip_engine_failed_no_ipv4_answer` — контрольный FakeIP
   DNS не ответил;
 - `postcheck:sing_box_fakeip_engine_failed_not_fake` — контрольный DNS ответил
@@ -854,6 +913,10 @@ sleep 3
 `_rollback_failed_manual_recovery_required` означает, что автоматический откат
 не подтверждён; не повторяйте `apply`, сохраните показанный путь `backup:` и
 используйте раздел «Аварийный откат из бэкапа».
+
+Строка `error:existing_dnsmasq_confdir_conflict` появляется до любых изменений,
+если роутер уже использует другой явный `confdir`. Скрипт не объединяет и не
+перезаписывает чужую DNS-конфигурацию автоматически.
 
 ### После изменения роутер всё равно возвращает FakeIP
 
@@ -926,7 +989,7 @@ logread -e dnsmasq | tail -50
 /etc/config/whatsapp_real_dns
 ```
 
-В `/etc/config/dhcp` должен присутствовать список `confdir`, содержащий:
+В `/etc/config/dhcp` должен присутствовать параметр `confdir` со значением:
 
 ```text
 /etc/config/dnsmasq.d
@@ -945,6 +1008,8 @@ server=/wa.me/REAL_DNS_IP
 
 ## Полезные ссылки
 
+- Публичный проект и релизы:
+  [Pingkazama/podkop-whatsapp-real-dns](https://github.com/Pingkazama/podkop-whatsapp-real-dns).
 - Обсуждения похожего поведения WhatsApp в Podkop:
   [#378](https://github.com/itdoginfo/podkop/issues/378),
   [#390](https://github.com/itdoginfo/podkop/issues/390),

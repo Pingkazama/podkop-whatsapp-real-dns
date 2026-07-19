@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.2] - 2026-07-20
+
+### Fixed
+
+- replace the full on-router `sysupgrade -b` archive with a minimal backup of
+  only the DHCP state and files managed by this tool, preventing unexpected
+  overlay exhaustion from unrelated `/root` content;
+- sample changing real-DNS answers repeatedly and report separate diagnostics
+  for no answer, remaining FakeIP, unrouted real IPs, and stopped dnsmasq;
+- use a scalar dnsmasq `confdir` and reject a different explicit `confdir`
+  before modifying the router;
+- atomically replace an existing executable after checksum and syntax checks,
+  preserving the previous executable when installation cannot complete;
+- recognize released state v2/v3 during `check` and migrate it to state v4 only
+  after a successful minimal backup.
+
+### Tests
+
+- cover v1.0.0/v1.0.1 managed-state checks and upgrade order;
+- verify that a failed installer replacement keeps the old executable and that
+  the installer never touches the managed DNS configuration.
+
 ## [1.0.1] - 2026-07-20
 
 ### Fixed

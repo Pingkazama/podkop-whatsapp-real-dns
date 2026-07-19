@@ -21,9 +21,9 @@
 - `whatsapp.com`, `whatsapp.net`, `whatsapp.biz` и `wa.me` получают реальные IP;
 - правила хранятся отдельно в `/etc/config/dnsmasq.d`, поэтому переживают
   `podkop restart`;
-- каждый IPv4 текущего контрольного DNS-ответа проверяется в
-  `inet PodkopTable podkop_subnets`;
-- до изменения создаются конфигурационный и `sysupgrade`-бэкапы;
+- меняющиеся DNS-ответы проверяются несколько раз, и каждый полученный IPv4
+  должен входить в `inet PodkopTable podkop_subnets`;
+- до изменения создаётся небольшой root-only бэкап только изменяемых файлов;
 - при неудачной финальной проверке скрипт автоматически откатывается.
 
 Скрипт не отключает FakeIP глобально, не удаляет community lists, не меняет VPS,
@@ -48,8 +48,29 @@ sh /tmp/install.sh
 wget -qO /tmp/install.sh https://github.com/Pingkazama/podkop-whatsapp-real-dns/releases/latest/download/install.sh && sh /tmp/install.sh
 ```
 
-Установщик сверяет SHA256 и копирует инструмент в
-`/usr/bin/whatsapp-real-dns-fix`. Он **не применяет DNS-изменения сам**.
+Установщик сверяет SHA256 и атомарно заменяет инструмент в
+`/usr/bin/whatsapp-real-dns-fix`. Он **не применяет DNS-изменения сам**, не
+удаляет рабочую DNS-конфигурацию и не создаёт на overlay накапливающиеся копии
+старого бинарника. Если финальная замена не удалась, прежний инструмент остаётся
+на месте.
+
+## Обновление v1.0.0/v1.0.1
+
+Удалять раннюю версию перед установкой новой не нужно. Повторно запустите
+актуальный установщик, затем выполните:
+
+```sh
+whatsapp-real-dns-fix check
+whatsapp-real-dns-fix apply
+whatsapp-real-dns-fix status
+```
+
+`check` распознаёт managed state v2/v3, проверяет резолвер, маршруты и FakeIP и
+печатает `upgrade:ready`. `apply` сначала сохраняет исходный DHCP state и прежний
+файл правила в минимальный бэкап, нормализует старый UCI-list `confdir` в scalar
+option и затем мигрирует конфигурацию в state v4. Неизвестная версия state
+останавливается до записи файлов с ошибкой
+`unsupported_managed_state_version`.
 
 ## Проверка и применение
 
@@ -96,8 +117,8 @@ whatsapp-real-dns-fix rollback
 `rollback:verified` означает, что исходная конфигурация восстановлена и dnsmasq
 проверен. Ошибка с суффиксом `_rollback_failed_manual_recovery_required`
 требует остановиться и выполнить ручное восстановление из показанного бэкапа.
-Строка `upgrade: Saving config files...` означает создание бэкапа и не является
-ошибкой.
+Автоматический `apply` не запускает `sysupgrade -b`: полный архив на небольшом
+overlay мог включить крупные файлы из `/root` и заполнить свободное место.
 
 После успешного `apply` обновите DNS-состояние на проблемном устройстве —
 например, переподключите сеть или перезапустите приложение — и проверьте текст,
@@ -119,7 +140,7 @@ whatsapp-real-dns-fix rollback
 ## Установка конкретной версии
 
 ```sh
-VERSION=v1.0.1 sh /tmp/install.sh
+VERSION=v1.0.2 sh /tmp/install.sh
 ```
 
 Хеши релизных файлов публикуются в `SHA256SUMS`.

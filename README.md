@@ -119,7 +119,7 @@ whatsapp-real-dns-fix rollback
 ## Установка конкретной версии
 
 ```sh
-VERSION=v1.0.0 sh /tmp/install.sh
+VERSION=v1.0.1 sh /tmp/install.sh
 ```
 
 Хеши релизных файлов публикуются в `SHA256SUMS`.

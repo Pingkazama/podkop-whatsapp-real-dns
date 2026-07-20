@@ -11,10 +11,13 @@ set -u
 
 STATE_PACKAGE="whatsapp_real_dns"
 STATE_FILE="/etc/config/$STATE_PACKAGE"
-STATE_VERSION="4"
+STATE_VERSION="5"
 DHCP_CONFIG="/etc/config/dhcp"
 DNSMASQ_INIT="/etc/init.d/dnsmasq"
 DNSMASQ_SECTION="dhcp.@dnsmasq[0]"
+EXTRACONF_OPTION="$DNSMASQ_SECTION.extraconftext"
+EXTRACONF_FILE_NAME="extraconfig.conf"
+# Legacy v1.0.0-v1.0.2 storage, retained only for migration and rollback.
 FIX_DIR="/etc/config/dnsmasq.d"
 FIX_CONF="$FIX_DIR/90-whatsapp-real-dns.conf"
 DOMAINS="whatsapp.com whatsapp.net whatsapp.biz wa.me"
@@ -205,7 +208,7 @@ choose_resolver() {
 }
 
 preflight_basic() {
-    for command_name in uci awk grep tr dnsmasq; do
+    for command_name in uci awk cat grep dnsmasq; do
         have "$command_name" || {
             fail "missing_command_$command_name"
             return 1
@@ -225,6 +228,11 @@ preflight_basic() {
 
 preflight() {
     preflight_basic || return 1
+
+    dnsmasq_supports_extraconftext || {
+        fail "dnsmasq_extraconftext_unsupported"
+        return 1
+    }
 
     is_ipv4 "$FAKE_DNS" || {
         fail "invalid_FAKE_DNS"
@@ -261,28 +269,59 @@ state_enabled() {
 
 managed_state_version_supported() {
     case "$1" in
-        ''|2|3|"$STATE_VERSION") return 0 ;;
+        ''|2|3|4|"$STATE_VERSION") return 0 ;;
         *) return 1 ;;
     esac
 }
 
 managed_installation_is_current() {
-    [ "$1" = "$STATE_VERSION" ] && [ -f "$FIX_CONF" ] && has_fix_confdir
+    [ "$1" = "$STATE_VERSION" ] || return 1
+    current_mode="$(uci -q get "$STATE_PACKAGE.settings.mode" 2>/dev/null || true)"
+    current_resolver="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
+    [ "$current_mode" = "extraconftext" ] &&
+        extraconftext_matches_resolver "$current_resolver"
 }
 
-has_fix_confdir() {
-    uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null |
-        tr ' ' '\n' | grep -Fx "$FIX_DIR" >/dev/null 2>&1
+dnsmasq_supports_extraconftext() {
+    grep -F "config_get extraconftext \"\$cfg\" extraconftext" \
+        "$DNSMASQ_INIT" >/dev/null 2>&1
 }
 
-confdir_is_compatible() {
-    current_confdir="$(uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null || true)"
-    [ -z "$current_confdir" ] || [ "$current_confdir" = "$FIX_DIR" ]
+dnsmasq_extraconftext() {
+    uci -q get "$EXTRACONF_OPTION" 2>/dev/null || true
+}
+
+dnsmasq_rules_for_resolver() {
+    rule_resolver="$1"
+    for domain in $DOMAINS; do
+        printf 'server=/%s/%s\n' "$domain" "$rule_resolver"
+    done
+}
+
+extraconftext_for_resolver() {
+    rule_resolver="$1"
+    separator=""
+    for domain in $DOMAINS; do
+        printf '%sserver=/%s/%s' "$separator" "$domain" "$rule_resolver"
+        separator='\n'
+    done
+    printf '\n'
+}
+
+extraconftext_is_empty() {
+    [ -z "$(dnsmasq_extraconftext)" ]
+}
+
+extraconftext_matches_resolver() {
+    match_resolver="$1"
+    [ -n "$match_resolver" ] || return 1
+    [ "$(dnsmasq_extraconftext)" = "$(extraconftext_for_resolver "$match_resolver")" ]
 }
 
 has_unmanaged_domain_conflict() {
     current="$(uci -q get "$DNSMASQ_SECTION.server" 2>/dev/null || true)
-$(uci -q get "$DNSMASQ_SECTION.podkop_server" 2>/dev/null || true)"
+$(uci -q get "$DNSMASQ_SECTION.podkop_server" 2>/dev/null || true)
+$(dnsmasq_extraconftext)"
 
     for domain in $DOMAINS; do
         printf '%s\n' "$current" | grep -F "/$domain/" >/dev/null 2>&1 && return 0
@@ -298,29 +337,21 @@ $(uci -q get "$DNSMASQ_SECTION.podkop_server" 2>/dev/null || true)"
     return 1
 }
 
-write_fix_conf() {
-    mkdir -p "$FIX_DIR" || return 1
-    chmod 700 "$FIX_DIR" 2>/dev/null || true
-    temp_conf="$FIX_CONF.tmp.$$"
+validate_extraconftext() {
+    temp_conf="/tmp/whatsapp-real-dns-extraconf.$$"
     umask 077
     : > "$temp_conf" || return 1
 
-    for domain in $DOMAINS; do
-        printf 'server=/%s/%s\n' "$domain" "$RESOLVER" >> "$temp_conf" || {
-            rm -f "$temp_conf"
-            return 1
-        }
-    done
+    dnsmasq_rules_for_resolver "$RESOLVER" > "$temp_conf" || {
+        rm -f "$temp_conf"
+        return 1
+    }
 
     dnsmasq --test --conf-file="$temp_conf" >/dev/null 2>&1 || {
         rm -f "$temp_conf"
         return 1
     }
-    mv "$temp_conf" "$FIX_CONF" || {
-        rm -f "$temp_conf"
-        return 1
-    }
-    chmod 600 "$FIX_CONF" 2>/dev/null || true
+    rm -f "$temp_conf"
     return 0
 }
 
@@ -385,6 +416,9 @@ restore_from_backup() {
 
     uci -q revert dhcp >/dev/null 2>&1 || true
     uci -q revert "$STATE_PACKAGE" >/dev/null 2>&1 || true
+    if [ -n "${RESOLVER:-}" ]; then
+        remove_managed_runtime_extraconf "$RESOLVER" || return 1
+    fi
     cp -p "$backup_dir/dhcp" "$DHCP_CONFIG" || return 1
 
     if [ -f "$backup_dir/state" ]; then
@@ -416,16 +450,45 @@ router_returns_real_routed_ips() {
     probe_real_dns_answers "$PROBE_NAME" 127.0.0.1
 }
 
-runtime_confdir_detected() {
+runtime_confdir_path() {
     for generated_conf in \
         /var/etc/dnsmasq.conf.* \
         /tmp/etc/dnsmasq.conf.* \
         /tmp/dnsmasq.conf.* \
         /tmp/dnsmasq.conf.*/*; do
         [ -f "$generated_conf" ] || continue
-        grep -F "conf-dir=$FIX_DIR" "$generated_conf" >/dev/null 2>&1 && return 0
+        runtime_dir="$(
+            awk -F= '$1 == "conf-dir" { print $2; exit }' "$generated_conf"
+        )"
+        runtime_dir="${runtime_dir%%,*}"
+        [ -n "$runtime_dir" ] || continue
+        printf '%s\n' "$runtime_dir"
+        return 0
     done
     return 1
+}
+
+runtime_extraconftext_detected() {
+    runtime_dir="$(runtime_confdir_path)" || return 1
+    runtime_file="$runtime_dir/$EXTRACONF_FILE_NAME"
+    [ -f "$runtime_file" ] || return 1
+    [ "$(cat "$runtime_file")" = "$(dnsmasq_rules_for_resolver "$RESOLVER")" ]
+}
+
+runtime_extraconftext_is_clear() {
+    runtime_dir="$(runtime_confdir_path)" || return 0
+    runtime_file="$runtime_dir/$EXTRACONF_FILE_NAME"
+    [ ! -s "$runtime_file" ]
+}
+
+remove_managed_runtime_extraconf() {
+    cleanup_resolver="$1"
+    runtime_dir="$(runtime_confdir_path)" || return 0
+    runtime_file="$runtime_dir/$EXTRACONF_FILE_NAME"
+    [ -e "$runtime_file" ] || return 0
+    [ "$(cat "$runtime_file")" = "$(dnsmasq_rules_for_resolver "$cleanup_resolver")" ] ||
+        return 1
+    rm -f "$runtime_file"
 }
 
 fakeip_engine_still_works() {
@@ -466,10 +529,10 @@ wait_for_postcheck() {
         attempt=$((attempt + 1))
         sleep 2
     done
-    if runtime_confdir_detected; then
-        POSTCHECK_RUNTIME_CONFDIR="detected"
+    if runtime_extraconftext_detected; then
+        POSTCHECK_RUNTIME_EXTRACONF="detected"
     else
-        POSTCHECK_RUNTIME_CONFDIR="not_detected"
+        POSTCHECK_RUNTIME_EXTRACONF="not_detected"
     fi
     return 1
 }
@@ -487,6 +550,22 @@ rollback_apply_failure() {
     return 1
 }
 
+remove_legacy_storage() {
+    legacy_confdir_added="$1"
+
+    rm -f "$FIX_CONF"
+    if [ "$legacy_confdir_added" = "1" ]; then
+        current_confdir="$(uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null || true)"
+        if [ "$current_confdir" = "$FIX_DIR" ]; then
+            uci -q delete "$DNSMASQ_SECTION.confdir" || return 1
+        else
+            uci -q del_list "$DNSMASQ_SECTION.confdir=$FIX_DIR" || true
+        fi
+    fi
+    rmdir "$FIX_DIR" 2>/dev/null || true
+    return 0
+}
+
 write_state() {
     old_confdir_added="$1"
     old_rules="$2"
@@ -497,21 +576,17 @@ write_state() {
     uci set "$STATE_PACKAGE.settings.installed=1" || return 1
     uci set "$STATE_PACKAGE.settings.enabled=1" || return 1
     uci set "$STATE_PACKAGE.settings.version=$STATE_VERSION" || return 1
-    uci set "$STATE_PACKAGE.settings.mode=confdir" || return 1
+    uci set "$STATE_PACKAGE.settings.mode=extraconftext" || return 1
     uci set "$STATE_PACKAGE.settings.resolver=$RESOLVER" || return 1
     uci set "$STATE_PACKAGE.settings.fake_dns=$FAKE_DNS" || return 1
     uci set "$STATE_PACKAGE.settings.backup_dir=$BACKUP_DIR" || return 1
     uci -q delete "$STATE_PACKAGE.settings.rule" || true
-
-    if has_fix_confdir; then
-        uci set "$DNSMASQ_SECTION.confdir=$FIX_DIR" || return 1
-        uci set "$STATE_PACKAGE.settings.confdir_added=$old_confdir_added" || return 1
-    else
-        uci set "$DNSMASQ_SECTION.confdir=$FIX_DIR" || return 1
-        uci set "$STATE_PACKAGE.settings.confdir_added=1" || return 1
-    fi
+    uci -q delete "$STATE_PACKAGE.settings.confdir_added" || true
+    uci set "$STATE_PACKAGE.settings.extraconftext_added=1" || return 1
+    uci set "$EXTRACONF_OPTION=$(extraconftext_for_resolver "$RESOLVER")" || return 1
 
     remove_legacy_rules "$old_rules"
+    remove_legacy_storage "$old_confdir_added" || return 1
     for rule in $(rules_for_resolver "$RESOLVER"); do
         uci add_list "$STATE_PACKAGE.settings.rule=$rule" || return 1
     done
@@ -520,11 +595,6 @@ write_state() {
 
 apply_fix() {
     preflight || return 1
-
-    confdir_is_compatible || {
-        fail "existing_dnsmasq_confdir_conflict"
-        return 1
-    }
 
     managed_before=0
     installed_version=""
@@ -548,6 +618,19 @@ apply_fix() {
             return $?
         fi
 
+        [ "$installed_version" != "$STATE_VERSION" ] || {
+            fail "managed_extraconftext_changed"
+            return 1
+        }
+        extraconftext_is_empty || {
+            fail "existing_dnsmasq_extraconftext_conflict"
+            return 1
+        }
+        runtime_extraconftext_is_clear || {
+            fail "existing_dnsmasq_runtime_extraconf_conflict"
+            return 1
+        }
+
         if ! resolver_is_safe "$RESOLVER"; then
             choose_resolver || {
                 print_real_dns_probe_diagnostic "resolver_probe"
@@ -564,6 +647,14 @@ apply_fix() {
             fail "existing_unmanaged_whatsapp_dns_rule"
             return 1
         fi
+        extraconftext_is_empty || {
+            fail "existing_dnsmasq_extraconftext_conflict"
+            return 1
+        }
+        runtime_extraconftext_is_clear || {
+            fail "existing_dnsmasq_runtime_extraconf_conflict"
+            return 1
+        }
         choose_resolver || {
             print_real_dns_probe_diagnostic "resolver_probe"
             fail "no_safe_real_dns_resolver"
@@ -572,13 +663,12 @@ apply_fix() {
     fi
 
     [ -n "$old_rules" ] || old_rules="$(rules_for_resolver "$RESOLVER")"
-    make_backup || {
-        fail "backup_failed"
+    validate_extraconftext || {
+        fail "dnsmasq_conf_test_failed"
         return 1
     }
-
-    write_fix_conf || {
-        rollback_apply_failure "dnsmasq_conf_test_failed"
+    make_backup || {
+        fail "backup_failed"
         return 1
     }
 
@@ -601,7 +691,7 @@ apply_fix() {
     if ! wait_for_postcheck; then
         if [ "$POSTCHECK_REAL_OK" != "1" ]; then
             print_real_dns_probe_diagnostic "postcheck:dnsmasq_whatsapp_answer"
-            say "postcheck:dnsmasq_runtime_confdir_$POSTCHECK_RUNTIME_CONFDIR" >&2
+            say "postcheck:dnsmasq_runtime_extraconf_$POSTCHECK_RUNTIME_EXTRACONF" >&2
         fi
         [ "$POSTCHECK_FAKE_OK" = "1" ] || say "postcheck:sing_box_fakeip_engine_failed_$FAKEIP_PROBE_RESULT" >&2
 
@@ -622,7 +712,7 @@ apply_fix() {
         say "result:installed"
     fi
     say "backup:$BACKUP_DIR"
-    say "storage:confdir_restart_safe"
+    say "storage:extraconftext_restart_safe"
     say "dnsmasq_whatsapp_answer:all_real_routed_via_podkop"
     say "sing_box_fakeip_engine:unchanged"
     return 0
@@ -642,16 +732,23 @@ status_fix() {
         say "state:managed_v$STATE_VERSION"
     else
         say "state:manual_or_legacy"
+        say "storage:legacy_upgrade_required"
+        return 1
     fi
 
-    if [ ! -f "$FIX_CONF" ]; then
-        say "storage:config_file_missing"
+    RESOLVER="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
+    current_mode="$(uci -q get "$STATE_PACKAGE.settings.mode" 2>/dev/null || true)"
+    if [ "$current_mode" != "extraconftext" ]; then
+        say "storage:mode_mismatch"
         return 1
-    elif ! has_fix_confdir; then
-        say "storage:confdir_missing"
+    elif ! extraconftext_matches_resolver "$RESOLVER"; then
+        say "storage:extraconftext_mismatch"
+        return 1
+    elif ! runtime_extraconftext_detected; then
+        say "storage:runtime_extraconf_missing"
         return 1
     else
-        say "storage:confdir_restart_safe"
+        say "storage:extraconftext_restart_safe"
     fi
 
     dnsmasq_service status >/dev/null 2>&1 || {
@@ -685,11 +782,6 @@ status_fix() {
 check_fix() {
     preflight || return 1
 
-    confdir_is_compatible || {
-        fail "existing_dnsmasq_confdir_conflict"
-        return 1
-    }
-
     if state_enabled; then
         say "existing_config:detected"
         installed_version="$(uci -q get "$STATE_PACKAGE.settings.version" 2>/dev/null || true)"
@@ -702,6 +794,19 @@ check_fix() {
             status_fix
             return $?
         fi
+
+        [ "$installed_version" != "$STATE_VERSION" ] || {
+            fail "managed_extraconftext_changed"
+            return 1
+        }
+        extraconftext_is_empty || {
+            fail "existing_dnsmasq_extraconftext_conflict"
+            return 1
+        }
+        runtime_extraconftext_is_clear || {
+            fail "existing_dnsmasq_runtime_extraconf_conflict"
+            return 1
+        }
 
         RESOLVER="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
         if ! resolver_is_safe "$RESOLVER"; then
@@ -734,6 +839,14 @@ check_fix() {
         fail "existing_unmanaged_whatsapp_dns_rule"
         return 1
     fi
+    extraconftext_is_empty || {
+        fail "existing_dnsmasq_extraconftext_conflict"
+        return 1
+    }
+    runtime_extraconftext_is_clear || {
+        fail "existing_dnsmasq_runtime_extraconf_conflict"
+        return 1
+    }
     choose_resolver || {
         print_real_dns_probe_diagnostic "resolver_probe"
         fail "no_safe_real_dns_resolver"
@@ -769,9 +882,15 @@ rollback_fix() {
     fi
 
     RESOLVER="$(uci -q get "$STATE_PACKAGE.settings.resolver" 2>/dev/null || true)"
+    mode="$(uci -q get "$STATE_PACKAGE.settings.mode" 2>/dev/null || true)"
     rules="$(uci -q get "$STATE_PACKAGE.settings.rule" 2>/dev/null || true)"
     [ -n "$rules" ] || rules="$(rules_for_resolver "$RESOLVER")"
     confdir_added="$(uci -q get "$STATE_PACKAGE.settings.confdir_added" 2>/dev/null || echo 0)"
+
+    if [ "$mode" = "extraconftext" ] && ! extraconftext_matches_resolver "$RESOLVER"; then
+        fail "managed_extraconftext_changed"
+        return 1
+    fi
 
     make_backup || {
         fail "rollback_backup_failed"
@@ -781,7 +900,13 @@ rollback_fix() {
     remove_legacy_rules "$rules"
     rm -f "$FIX_CONF"
 
-    if [ "$confdir_added" = "1" ]; then
+    if [ "$mode" = "extraconftext" ]; then
+        uci -q delete "$EXTRACONF_OPTION" || {
+            restore_from_backup "$BACKUP_DIR"
+            fail "rollback_extraconftext_delete_failed_restored"
+            return 1
+        }
+    elif [ "$confdir_added" = "1" ]; then
         current_confdir="$(uci -q get "$DNSMASQ_SECTION.confdir" 2>/dev/null || true)"
         if [ "$current_confdir" = "$FIX_DIR" ]; then
             uci -q delete "$DNSMASQ_SECTION.confdir" || true
@@ -796,6 +921,11 @@ rollback_fix() {
         fail "rollback_commit_failed_restored"
         return 1
     }
+    if [ "$mode" = "extraconftext" ] &&
+        ! remove_managed_runtime_extraconf "$RESOLVER"; then
+        rollback_apply_failure "rollback_runtime_extraconf_cleanup_failed"
+        return 1
+    fi
     rm -f "$STATE_FILE"
 
     dnsmasq_service restart >/dev/null 2>&1 || {

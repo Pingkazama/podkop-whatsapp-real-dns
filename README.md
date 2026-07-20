@@ -19,8 +19,9 @@
 ## Что меняется
 
 - `whatsapp.com`, `whatsapp.net`, `whatsapp.biz` и `wa.me` получают реальные IP;
-- правила хранятся отдельно в `/etc/config/dnsmasq.d`, поэтому переживают
-  `podkop restart`;
+- правила хранятся в UCI `extraconftext`, поэтому штатный init-скрипт dnsmasq
+  восстанавливает их после `podkop restart` и перезагрузки;
+- существующий runtime-`confdir`, включая обычный `/tmp/dnsmasq.d`, не меняется;
 - меняющиеся DNS-ответы проверяются несколько раз, и каждый полученный IPv4
   должен входить в `inet PodkopTable podkop_subnets`;
 - до изменения создаётся небольшой root-only бэкап только изменяемых файлов;
@@ -54,7 +55,7 @@ wget -qO /tmp/install.sh https://github.com/Pingkazama/podkop-whatsapp-real-dns/
 старого бинарника. Если финальная замена не удалась, прежний инструмент остаётся
 на месте.
 
-## Обновление v1.0.0/v1.0.1
+## Обновление v1.0.0/v1.0.1/v1.0.2
 
 Удалять раннюю версию перед установкой новой не нужно. Повторно запустите
 актуальный установщик, затем выполните:
@@ -65,10 +66,12 @@ whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 ```
 
-`check` распознаёт managed state v2/v3, проверяет резолвер, маршруты и FakeIP и
-печатает `upgrade:ready`. `apply` сначала сохраняет исходный DHCP state и прежний
-файл правила в минимальный бэкап, нормализует старый UCI-list `confdir` в scalar
-option и затем мигрирует конфигурацию в state v4. Неизвестная версия state
+`check` распознаёт managed state v2/v3/v4, проверяет резолвер, маршруты и FakeIP
+и печатает `upgrade:ready`. `apply` сначала сохраняет исходный DHCP state и
+прежний файл правила в минимальный бэкап, затем переносит правила в
+`extraconftext` и мигрирует конфигурацию в state v5. Старый управляемый
+`/etc/config/dnsmasq.d` удаляется после бэкапа, а обычный runtime-каталог
+`/tmp/dnsmasq.d` остаётся без изменений. Неизвестная версия state
 останавливается до записи файлов с ошибкой
 `unsupported_managed_state_version`.
 
@@ -127,6 +130,7 @@ overlay мог включить крупные файлы из `/root` и зап
 ## Требования
 
 - OpenWrt с `dnsmasq`, UCI и `nftables`;
+- init-скрипт dnsmasq с поддержкой UCI `extraconftext`;
 - запущенные Podkop и sing-box;
 - активный набор `inet PodkopTable podkop_subnets`;
 - IPv4 DNS в `podkop.settings.dns_server` или
@@ -140,7 +144,7 @@ overlay мог включить крупные файлы из `/root` и зап
 ## Установка конкретной версии
 
 ```sh
-VERSION=v1.0.2 sh /tmp/install.sh
+VERSION=v1.0.3 sh /tmp/install.sh
 ```
 
 Хеши релизных файлов публикуются в `SHA256SUMS`.
@@ -155,8 +159,10 @@ VERSION=v1.0.2 sh /tmp/install.sh
 ```
 
 Прямое добавление правил в `dhcp.@dnsmasq[0].server` ненадёжно: Podkop может
-пересобрать этот UCI-список при перезапуске. Поэтому правила лежат в отдельном
-`confdir`, подключённом к dnsmasq.
+пересобрать этот UCI-список при перезапуске. Поэтому правила хранятся в
+`dhcp.@dnsmasq[0].extraconftext`; штатный init-скрипт OpenWrt разворачивает их в
+`extraconfig.conf` внутри своего runtime-`confdir`. Инструмент не заменяет
+существующий `confdir`.
 
 Полное объяснение, ручная установка, диагностика и ручной откат находятся в
 [инструкции для начинающих](docs/manual-ru.md).

@@ -67,7 +67,7 @@ EOF
 chmod 700 "$TARGET"
 
 INSTALL_OUTPUT="$(
-    PATH="$MOCK_BIN:$PATH" TARGET="$TARGET" VERSION=v1.0.2 \
+    PATH="$MOCK_BIN:$PATH" TARGET="$TARGET" VERSION=v1.0.3 \
         sh "$PROJECT_DIR/install.sh"
 )" || fail_test "installer_replacement_failed"
 cmp -s "$MOCK_ASSET" "$TARGET" || fail_test "new_script_not_installed"
@@ -86,7 +86,7 @@ chmod 700 "$TARGET"
 cp "$TARGET" "$TEST_TMP/expected-legacy"
 set +e
 FAILED_OUTPUT="$(
-    MOCK_MV_FAIL=1 PATH="$MOCK_BIN:$PATH" TARGET="$TARGET" VERSION=v1.0.2 \
+    MOCK_MV_FAIL=1 PATH="$MOCK_BIN:$PATH" TARGET="$TARGET" VERSION=v1.0.3 \
         sh "$PROJECT_DIR/install.sh" 2>&1
 )"
 FAILED_STATUS=$?

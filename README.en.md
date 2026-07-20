@@ -38,11 +38,13 @@ whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 ```
 
-To upgrade v1.0.0 or v1.0.1, run the current installer without uninstalling the
-old version, then run the three commands above. `check` recognizes managed state
-v2/v3 and reports `upgrade:ready`; `apply` creates a minimal backup before
-normalizing the old `confdir` UCI list to a scalar option and migrating to state
-v4. An unknown managed-state version is rejected before any files are changed.
+To upgrade v1.0.0, v1.0.1, or v1.0.2, run the current installer without
+uninstalling the old version, then run the three commands above. `check`
+recognizes managed state v2/v3/v4 and reports `upgrade:ready`; `apply` creates a
+minimal backup before moving the rules to UCI `extraconftext` and migrating to
+state v5. It removes only the legacy managed `/etc/config/dnsmasq.d` setting;
+the normal runtime `/tmp/dnsmasq.d` remains unchanged. An unknown managed-state
+version is rejected before any files are changed.
 
 A successful `check` now also prints
 `sing_box_fakeip_engine:active`. If sing-box uses a confirmed non-default local
@@ -69,8 +71,10 @@ whatsapp-real-dns-fix rollback
 - samples changing DNS answers repeatedly and requires every returned IPv4 to
   use Podkop routing;
 - creates a small root-only backup of only the files it changes;
-- stores rules in a Podkop-restart-safe dnsmasq `confdir`;
-- rejects a different explicit dnsmasq `confdir` before making changes;
+- stores rules in UCI `extraconftext`, which the OpenWrt dnsmasq init script
+  recreates in its runtime `confdir` after restarts;
+- leaves an existing runtime `confdir`, including `/tmp/dnsmasq.d`, unchanged;
+- rejects an already occupied `extraconftext` before making changes;
 - automatically rolls back when post-install checks fail;
 - distinguishes no answer, remaining FakeIP, an unrouted real IP, stopped
   dnsmasq, and FakeIP control failures;

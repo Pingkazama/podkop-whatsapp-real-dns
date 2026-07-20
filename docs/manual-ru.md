@@ -91,23 +91,16 @@ dnsmasq умеет отправлять разные домены разным D
 UCI — стандартная система конфигурации OpenWrt. Команда `uci` меняет файлы в
 `/etc/config/`, а `uci commit` сохраняет изменения постоянно.
 
-### confdir
+### confdir и extraconftext
 
-`confdir` — дополнительный каталог с конфигурационными файлами dnsmasq. В этой
-инструкции используется:
+OpenWrt сам управляет рабочим `confdir` dnsmasq. На проверенном роутере это
+`/tmp/dnsmasq.d`; каталог находится в RAM и нормально создаётся заново после
+перезагрузки. Исправление не меняет этот параметр.
 
-```text
-/etc/config/dnsmasq.d
-```
-
-Сам файл правил будет называться:
-
-```text
-/etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
-```
-
-Каталог специально находится внутри `/etc/config`, чтобы попасть в обычный
-OpenWrt `sysupgrade`-бэкап.
+Постоянные правила хранятся в стандартном UCI-параметре `extraconftext` внутри
+`/etc/config/dhcp`. При каждом запуске dnsmasq штатный init-скрипт OpenWrt
+разворачивает их в файл `extraconfig.conf` внутри своего рабочего `confdir`.
+Поэтому отдельный постоянный каталог `/etc/config/dnsmasq.d` не нужен.
 
 ### podkop_subnets
 
@@ -141,9 +134,9 @@ uci add_list dhcp.@dnsmasq[0].server='/whatsapp.net/REAL_DNS_IP'
 - перезапуска управляемых компонентов Podkop;
 - некоторых восстановительных действий watchdog.
 
-Отдельный `confdir` решает эту проблему: Podkop продолжает управлять своим
-списком `server`, а наши четыре правила загружаются dnsmasq из независимого
-файла.
+`extraconftext` решает эту проблему: Podkop продолжает управлять своим списком
+`server`, а штатный init-скрипт dnsmasq добавляет наши четыре правила отдельно
+и восстанавливает runtime-файл после каждого рестарта.
 
 ## Что эта инструкция не меняет
 
@@ -220,7 +213,7 @@ sing_box_fakeip_engine:active
 3. несколько раз проверит меняющиеся реальные IPv4 WhatsApp в
    `podkop_subnets`;
 4. создаст небольшой root-only бэкап только тех файлов, которые сам меняет;
-5. создаст нейтральный conf-файл и UCI state;
+5. запишет четыре правила в UCI `extraconftext` и создаст managed state;
 6. перезапустит только dnsmasq;
 7. проверит реальные DNS-ответы, маршрутизацию и сохранение общего FakeIP;
 8. при ошибке отдельно укажет отсутствие DNS-ответа, оставшийся FakeIP,
@@ -236,7 +229,7 @@ sing_box_fakeip_engine:active
 
 ### Обновление ранней автоматической версии
 
-Если уже установлена v1.0.0 или v1.0.1, сначала откатывать либо удалять её
+Если уже установлена v1.0.0, v1.0.1 или v1.0.2, сначала откатывать либо удалять её
 DNS-конфигурацию не нужно. Установщик актуального релиза проверяет SHA256 и
 синтаксис во временном каталоге, затем атомарно заменяет только
 `/usr/bin/whatsapp-real-dns-fix`. При сбое финальной замены старый исполняемый
@@ -250,7 +243,7 @@ whatsapp-real-dns-fix apply
 whatsapp-real-dns-fix status
 ```
 
-Для выпущенных managed state v2/v3 команда `check` выполняет безопасные проверки
+Для выпущенных managed state v2/v3/v4 команда `check` выполняет безопасные проверки
 резолвера, маршрутов и FakeIP и печатает:
 
 ```text
@@ -259,9 +252,11 @@ existing_config:source_state_v2
 upgrade:ready
 ```
 
-Для v1.0.1 номер будет `v3`. Затем `apply` сначала сохраняет DHCP state и старый
-файл правила в минимальный бэкап, заменяет старый UCI-list `confdir` на scalar
-option с тем же управляемым путём и мигрирует конфигурацию в state v4.
+Для v1.0.1 номер будет `v3`, для v1.0.2 — `v4`. Затем `apply` сначала сохраняет
+DHCP state и старый файл правила в минимальный бэкап, переносит правила в
+`extraconftext` и мигрирует конфигурацию в state v5. Старый управляемый
+`/etc/config/dnsmasq.d` удаляется только после бэкапа. Штатный
+`/tmp/dnsmasq.d` не изменяется.
 Неизвестная версия state останавливается до записи файлов с ошибкой
 `error:unsupported_managed_state_version`.
 
@@ -482,7 +477,7 @@ chmod 700 "$BACKUP_DIR"
 cp -p /etc/config/dhcp "$BACKUP_DIR/dhcp"
 ```
 
-Если файл исправления уже существовал, сохраняем только его:
+Если остался файл ранней версии исправления, сохраняем и его для совместимости:
 
 ```sh
 if [ -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf ]; then
@@ -491,7 +486,8 @@ if [ -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf ]; then
 fi
 ```
 
-Этих файлов достаточно для отката именно данного исправления. Проверяем
+DHCP-файла достаточно для отката актуальной версии; `fix-conf` нужен только при
+миграции старой. Проверяем
 результат:
 
 ```sh
@@ -509,84 +505,59 @@ ssh root@OPENWRT_IP 'sysupgrade -b -' > openwrt-config-backup.tar.gz
 > Архив `openwrt-config-backup.tar.gz` может содержать пароли, ключи и другие
 > приватные настройки. Не публикуйте и не отправляйте его посторонним.
 
-## Шаг 5. Создаём отдельный конфигурационный файл dnsmasq
+## Шаг 5. Проверяем поддержку extraconftext и синтаксис правил
 
-Создаём каталог:
+Убеждаемся, что init-скрипт этой сборки OpenWrt поддерживает постоянный
+UCI-параметр `extraconftext`:
 
 ```sh
-mkdir -p /etc/config/dnsmasq.d
-chmod 700 /etc/config/dnsmasq.d
+grep -F 'config_get extraconftext "$cfg" extraconftext' \
+    /etc/init.d/dnsmasq
 ```
 
-Создаём файл с четырьмя правилами. Переменная `REAL_DNS` должна всё ещё
-содержать проверенный адрес из шага 2:
+Если строка не найдена, остановитесь: описанный способ для этой сборки не
+подтверждён. Затем проверяем, что параметр ещё не занят другой настройкой:
 
 ```sh
-cat > /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf <<EOF
+CURRENT_EXTRACONF="$(
+    uci -q get dhcp.@dnsmasq[0].extraconftext 2>/dev/null || true
+)"
+test -z "$CURRENT_EXTRACONF" || {
+    echo "СТОП: extraconftext уже используется"
+    return 1 2>/dev/null || exit 1
+}
+```
+
+Переменная `REAL_DNS` должна всё ещё содержать проверенный адрес из шага 2.
+Создаём только временный файл для проверки синтаксиса:
+
+```sh
+TEST_CONF=/tmp/whatsapp-real-dns-test.conf
+cat > "$TEST_CONF" <<EOF
 server=/whatsapp.com/$REAL_DNS
 server=/whatsapp.net/$REAL_DNS
 server=/whatsapp.biz/$REAL_DNS
 server=/wa.me/$REAL_DNS
 EOF
 
-chmod 600 /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
+dnsmasq --test --conf-file="$TEST_CONF"
+rm -f "$TEST_CONF"
 ```
 
-Просматриваем созданный файл:
+Ожидается сообщение об успешной проверке. При ошибке не перезапускайте dnsmasq.
+
+## Шаг 6. Сохраняем правила через UCI extraconftext
+
+Записываем четыре правила одной UCI-строкой с литеральными разделителями `\n`.
+Штатный init-скрипт dnsmasq превратит их в четыре строки при запуске:
 
 ```sh
-sed -n '1,20p' /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
+EXTRACONF_TEXT="server=/whatsapp.com/$REAL_DNS\\nserver=/whatsapp.net/$REAL_DNS\\nserver=/whatsapp.biz/$REAL_DNS\\nserver=/wa.me/$REAL_DNS"
+uci set dhcp.@dnsmasq[0].extraconftext="$EXTRACONF_TEXT"
 ```
 
-В нём должно быть ровно четыре строки `server=...` и выбранный DNS IPv4.
-
-Проверяем синтаксис файла до перезапуска рабочего DNS:
-
-```sh
-dnsmasq --test \
-    --conf-file=/etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
-```
-
-Ожидается сообщение о том, что проверка синтаксиса успешна. При ошибке не
-перезапускайте dnsmasq — исправьте файл или выполните откат из соответствующего
-раздела ниже.
-
-## Шаг 6. Подключаем confdir через UCI
-
-Сначала читаем текущее значение:
-
-```sh
-CURRENT_CONFDIR="$(
-    uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true
-)"
-printf 'Текущий confdir: %s\n' "${CURRENT_CONFDIR:-<не задан>}"
-```
-
-Продолжаем только если значение не задано либо уже равно
-`/etc/config/dnsmasq.d`. Чужой `confdir` автоматически не объединяем и не
-перезаписываем:
-
-```sh
-case "$CURRENT_CONFDIR" in
-    '')
-        uci set dhcp.@dnsmasq[0].confdir='/etc/config/dnsmasq.d'
-        CONFDIR_ADDED=1
-        echo "confdir добавлен"
-        ;;
-    /etc/config/dnsmasq.d)
-        CONFDIR_ADDED=0
-        echo "confdir уже существовал"
-        ;;
-    *)
-        echo "СТОП: уже настроен другой confdir: $CURRENT_CONFDIR"
-        echo "Не продолжайте без отдельного плана интеграции"
-        return 1 2>/dev/null || exit 1
-        ;;
-esac
-```
-
-Создаём небольшой нейтральный state-файл. Он нужен только для понятного ручного
-отката:
+Существующий `confdir`, включая штатный `/tmp/dnsmasq.d`, не меняем. Создаём
+небольшой state-файл для понятного ручного отката:
 
 ```sh
 touch /etc/config/whatsapp_real_dns
@@ -594,26 +565,23 @@ chmod 600 /etc/config/whatsapp_real_dns
 
 uci set whatsapp_real_dns.settings='settings'
 uci set whatsapp_real_dns.settings.enabled='1'
-uci set whatsapp_real_dns.settings.mode='confdir'
+uci set whatsapp_real_dns.settings.version='5'
+uci set whatsapp_real_dns.settings.mode='extraconftext'
 uci set whatsapp_real_dns.settings.resolver="$REAL_DNS"
-uci set whatsapp_real_dns.settings.confdir_added="$CONFDIR_ADDED"
+uci set whatsapp_real_dns.settings.extraconftext_added='1'
 uci set whatsapp_real_dns.settings.backup_dir="$BACKUP_DIR"
-```
 
-Сохраняем изменения:
-
-```sh
 uci commit whatsapp_real_dns
 uci commit dhcp
 ```
 
-Проверяем, что UCI видит каталог:
+Проверяем постоянное значение, не раскрывая и не преобразуя его оболочкой:
 
 ```sh
-uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null |
-    tr ' ' '\n' |
-    grep -Fx /etc/config/dnsmasq.d
+uci -q get dhcp.@dnsmasq[0].extraconftext
 ```
+
+В выводе должны быть четыре правила, разделённые символами `\n`.
 
 ## Шаг 7. Перезапускаем только dnsmasq
 
@@ -627,6 +595,24 @@ sleep 3
 
 Если dnsmasq не запустился, сразу переходите к разделу «Аварийный откат из
 бэкапа».
+
+Проверяем, что OpenWrt создал runtime-файл в своём текущем `confdir`:
+
+```sh
+GENERATED_CONF="$(
+    ls -1 /var/etc/dnsmasq.conf.* /tmp/etc/dnsmasq.conf.* 2>/dev/null |
+        head -1
+)"
+RUNTIME_CONFDIR="$(
+    awk -F= '$1 == "conf-dir" { print $2; exit }' "$GENERATED_CONF"
+)"
+RUNTIME_CONFDIR="${RUNTIME_CONFDIR%%,*}"
+printf 'Runtime confdir: %s\n' "$RUNTIME_CONFDIR"
+sed -n '1,20p' "$RUNTIME_CONFDIR/extraconfig.conf"
+```
+
+В `extraconfig.conf` должны быть ровно четыре строки `server=...`. Сам файл
+временный; его постоянный источник — `/etc/config/dhcp`.
 
 ## Шаг 8. Проверяем DNS после изменения
 
@@ -727,16 +713,12 @@ sleep 12
 pidof sing-box
 ```
 
-Проверяем, что файл на месте и confdir всё ещё подключён:
+Проверяем, что постоянное значение и заново созданный runtime-файл на месте:
 
 ```sh
-test -s /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf \
-    && echo "Файл правила на месте"
-
-uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null |
-    tr ' ' '\n' |
-    grep -Fx /etc/config/dnsmasq.d \
-    && echo "confdir подключён"
+uci -q get dhcp.@dnsmasq[0].extraconftext
+test -s "$RUNTIME_CONFDIR/extraconfig.conf" \
+    && echo "Runtime-файл правила восстановлен"
 ```
 
 Повторяем главную DNS-проверку:
@@ -774,38 +756,29 @@ nslookup api.whatsapp.net 127.0.0.1
 
 Этот способ используется, если роутер доступен и dnsmasq запускается.
 
-Смотрим, добавляла ли инструкция новый confdir:
+Сначала убеждаемся, что state относится к актуальному способу хранения:
 
 ```sh
-CONFDIR_ADDED="$(
-    uci -q get whatsapp_real_dns.settings.confdir_added 2>/dev/null || echo 0
+test "$(uci -q get whatsapp_real_dns.settings.mode)" = "extraconftext" || {
+    echo "СТОП: неизвестный режим; используйте бэкап"
+    return 1 2>/dev/null || exit 1
+}
+
+REAL_DNS="$(uci -q get whatsapp_real_dns.settings.resolver)"
+EXPECTED_EXTRACONF="server=/whatsapp.com/$REAL_DNS\\nserver=/whatsapp.net/$REAL_DNS\\nserver=/whatsapp.biz/$REAL_DNS\\nserver=/wa.me/$REAL_DNS"
+CURRENT_EXTRACONF="$(
+    uci -q get dhcp.@dnsmasq[0].extraconftext 2>/dev/null || true
 )"
+test "$CURRENT_EXTRACONF" = "$EXPECTED_EXTRACONF" || {
+    echo "СТОП: extraconftext изменён после установки; используйте бэкап"
+    return 1 2>/dev/null || exit 1
+}
 ```
 
-Удаляем только файл WhatsApp:
+Удаляем только управляемый параметр `extraconftext`. `confdir` не трогаем:
 
 ```sh
-rm -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
-```
-
-Если каталог был добавлен именно этой инструкцией, удаляем UCI-значение:
-
-```sh
-if [ "$CONFDIR_ADDED" = "1" ]; then
-    CURRENT_CONFDIR="$(
-        uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true
-    )"
-    if [ "$CURRENT_CONFDIR" = "/etc/config/dnsmasq.d" ]; then
-        uci -q delete dhcp.@dnsmasq[0].confdir || true
-    fi
-fi
-```
-
-Пустой каталог можно удалить. Если внутри есть другие файлы, каталог не
-трогаем:
-
-```sh
-rmdir /etc/config/dnsmasq.d 2>/dev/null || true
+uci -q delete dhcp.@dnsmasq[0].extraconftext
 ```
 
 Сохраняем DHCP-конфигурацию и удаляем только наш state-файл:
@@ -853,15 +826,15 @@ echo "$BACKUP_DIR"
 cp -p "$BACKUP_DIR/dhcp" /etc/config/dhcp
 ```
 
-Удаляем созданный файл:
+Удаляем managed state. Восстановленный DHCP-файл уже вернул прежнее значение
+`extraconftext` и не меняет штатный `confdir`:
 
 ```sh
-rm -f /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
 rm -f /etc/config/whatsapp_real_dns
 ```
 
-Если до изменения существовал именно файл правила, восстанавливаем его. Другие
-файлы каталога не перемещаем и не перезаписываем:
+Если бэкап создавался при миграции старой версии, восстанавливаем её прежний
+файл правила. Другие файлы каталога не перемещаем и не перезаписываем:
 
 ```sh
 if [ -f "$BACKUP_DIR/fix-conf" ]; then
@@ -885,7 +858,7 @@ sleep 3
 Если полный конфигурационный архив был отдельно сохранён на доверенном
 компьютере, его можно использовать по стандартной процедуре `sysupgrade -r`.
 Для отката данного исправления обычно достаточно вернуть `/etc/config/dhcp` и
-его прежний файл правила.
+удалить managed state. Старый файл правила нужен только при обратной миграции.
 
 ## Типовые проблемы
 
@@ -901,8 +874,8 @@ IP-адреса:
   реальный IPv4 отсутствует в `podkop_subnets`; это терминальная проверка,
   поэтому скрипт не ждёт следующего DNS-ответа и сразу переходит к откату;
 - `postcheck:dnsmasq_whatsapp_answer:dnsmasq_not_running` — dnsmasq остановился;
-- `postcheck:dnsmasq_runtime_confdir_detected` или суффикс `not_detected`
-  показывает, найден ли каталог исправления в сгенерированной конфигурации;
+- `postcheck:dnsmasq_runtime_extraconf_detected` или суффикс `not_detected`
+  показывает, создан ли штатным init-скриптом runtime-файл `extraconfig.conf`;
 - `postcheck:sing_box_fakeip_engine_failed_no_ipv4_answer` — контрольный FakeIP
   DNS не ответил;
 - `postcheck:sing_box_fakeip_engine_failed_not_fake` — контрольный DNS ответил
@@ -914,28 +887,38 @@ IP-адреса:
 не подтверждён; не повторяйте `apply`, сохраните показанный путь `backup:` и
 используйте раздел «Аварийный откат из бэкапа».
 
-Строка `error:existing_dnsmasq_confdir_conflict` появляется до любых изменений,
-если роутер уже использует другой явный `confdir`. Скрипт не объединяет и не
-перезаписывает чужую DNS-конфигурацию автоматически.
+Строка `error:existing_dnsmasq_extraconftext_conflict` появляется до любых
+изменений, если `extraconftext` уже занят другой настройкой. Скрипт не
+перезаписывает чужую DNS-конфигурацию автоматически. Обычный
+`option confdir '/tmp/dnsmasq.d'` конфликтом не является и не меняется.
+
+Строка `error:dnsmasq_extraconftext_unsupported` означает, что init-скрипт этой
+сборки OpenWrt не содержит проверенного механизма `extraconftext`; запись не
+выполняется.
+
+Строка `error:existing_dnsmasq_runtime_extraconf_conflict` означает, что при
+пустом UCI-параметре в runtime-каталоге уже лежит непустой
+`extraconfig.conf`. Скрипт не перезаписывает такой необъяснённый файл.
 
 ### После изменения роутер всё равно возвращает FakeIP
 
-Проверьте наличие файла:
+Проверьте постоянное UCI-значение:
 
 ```sh
-ls -l /etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
+uci -q get dhcp.@dnsmasq[0].extraconftext
 ```
 
-Проверьте UCI confdir:
+Найдите реальный runtime-каталог в сгенерированной конфигурации dnsmasq:
 
 ```sh
-uci -q get dhcp.@dnsmasq[0].confdir
+grep -Hn '^conf-dir=' \
+    /var/etc/dnsmasq.conf.* /tmp/etc/dnsmasq.conf.* 2>/dev/null
 ```
 
-Проверьте сгенерированную конфигурацию dnsmasq:
+Для показанного в диагностике `/tmp/dnsmasq.d` проверьте созданный файл:
 
 ```sh
-grep -R '/etc/config/dnsmasq.d' /var/etc/dnsmasq.conf.* 2>/dev/null
+sed -n '1,20p' /tmp/dnsmasq.d/extraconfig.conf
 ```
 
 После исправления перезапустите только dnsmasq и повторите `nslookup`.
@@ -954,7 +937,7 @@ grep -R '/etc/config/dnsmasq.d' /var/etc/dnsmasq.conf.* 2>/dev/null
 
 ```sh
 dnsmasq --test \
-    --conf-file=/etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
+    --conf-file=/tmp/dnsmasq.d/extraconfig.conf
 ```
 
 Затем посмотрите последние сообщения:
@@ -982,20 +965,22 @@ logread -e dnsmasq | tail -50
 
 ## Итоговое состояние файлов
 
-После успешной установки должны существовать:
+После успешной установки постоянным должен быть только managed state:
 
 ```text
-/etc/config/dnsmasq.d/90-whatsapp-real-dns.conf
 /etc/config/whatsapp_real_dns
 ```
 
-В `/etc/config/dhcp` должен присутствовать параметр `confdir` со значением:
+В `/etc/config/dhcp` должен присутствовать `option extraconftext` с четырьмя
+правилами, разделёнными литеральными `\n`:
 
 ```text
-/etc/config/dnsmasq.d
+server=/whatsapp.com/REAL_DNS_IP\nserver=/whatsapp.net/REAL_DNS_IP\nserver=/whatsapp.biz/REAL_DNS_IP\nserver=/wa.me/REAL_DNS_IP
 ```
 
-Файл `90-whatsapp-real-dns.conf` должен содержать четыре строки:
+После запуска dnsmasq OpenWrt создаёт временный `extraconfig.conf` в своём
+runtime-`confdir`. На показанном роутере это
+`/tmp/dnsmasq.d/extraconfig.conf`, и файл содержит четыре строки:
 
 ```text
 server=/whatsapp.com/REAL_DNS_IP
@@ -1005,6 +990,7 @@ server=/wa.me/REAL_DNS_IP
 ```
 
 В реальном файле вместо `REAL_DNS_IP` будет выбранный обычный DNS IPv4.
+Существующее значение `confdir` остаётся таким, каким его настроил OpenWrt.
 
 ## Полезные ссылки
 

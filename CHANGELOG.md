@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## [1.0.3] - 2026-07-20
+
+### Fixed
+
+- stop treating OpenWrt's normal `/tmp/dnsmasq.d` runtime directory as a
+  conflicting user configuration;
+- persist the four rules through the supported UCI `extraconftext` hook and
+  verify the generated runtime `extraconfig.conf` after dnsmasq restart;
+- leave the router's existing `confdir` untouched and reject only an already
+  occupied `extraconftext` value;
+- migrate released state v2/v3/v4 installations to state v5 after a successful
+  minimal backup, removing only legacy storage owned by this tool;
+- block rollback if the managed `extraconftext` value was changed externally;
+- remove the generated runtime file during rollback and automatic recovery so
+  an unset `extraconftext` cannot leave the managed rules active in RAM.
+
+### Tests
+
+- reproduce the reported OpenWrt layout with `confdir=/tmp/dnsmasq.d` and an
+  unset `extraconftext`;
+- cover legacy-state migration, runtime-file checks, occupied configuration,
+  and guarded rollback.
+
 ## [1.0.2] - 2026-07-20
 
 ### Fixed

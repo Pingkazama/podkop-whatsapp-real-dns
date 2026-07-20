@@ -134,7 +134,7 @@ uci() {
 }
 
 DNSMASQ_INIT="$TEST_TMP/dnsmasq.init"
-printf '%s\n' 'config_get extraconftext "$cfg" extraconftext' > "$DNSMASQ_INIT"
+printf '%s\n' "config_get extraconftext \"\$cfg\" extraconftext" > "$DNSMASQ_INIT"
 dnsmasq_supports_extraconftext || fail_test "extraconftext_support_not_detected"
 printf '%s\n' '# legacy dnsmasq init' > "$DNSMASQ_INIT"
 dnsmasq_supports_extraconftext && fail_test "missing_extraconftext_support_accepted"
@@ -319,7 +319,7 @@ grep -F 'minimal-v1' "$PROJECT_DIR/whatsapp-real-dns-fix.sh" >/dev/null ||
 grep -F 'existing_dnsmasq_confdir_conflict' \
     "$PROJECT_DIR/whatsapp-real-dns-fix.sh" >/dev/null &&
     fail_test "runtime_confdir_still_treated_as_conflict"
-grep -F 'set "$DNSMASQ_SECTION.confdir=' \
+grep -F "set \"\$DNSMASQ_SECTION.confdir=" \
     "$PROJECT_DIR/whatsapp-real-dns-fix.sh" >/dev/null &&
     fail_test "runtime_confdir_still_overwritten"
 

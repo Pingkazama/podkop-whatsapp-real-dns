@@ -283,7 +283,7 @@ managed_installation_is_current() {
 }
 
 dnsmasq_supports_extraconftext() {
-    grep -F 'config_get extraconftext "$cfg" extraconftext' \
+    grep -F "config_get extraconftext \"\$cfg\" extraconftext" \
         "$DNSMASQ_INIT" >/dev/null 2>&1
 }
 
